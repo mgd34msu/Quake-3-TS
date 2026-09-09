@@ -1,0 +1,33 @@
+{
+  "name": "quake-3-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-2.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgd34msu/Quake-3-TS.git"
+  },
+  "homepage": "https://github.com/mgd34msu/Quake-3-TS#readme",
+  "bugs": {
+    "url": "https://github.com/mgd34msu/Quake-3-TS/issues"
+  },
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "policy": "bun run tools/type-policy.ts",
+    "test": "bun test",
+    "check": "bun run tools/check.ts",
+    "check:portable": "bun run tools/check.ts --portable",
+    "build": "bun run tools/build.ts",
+    "inventory": "bun run tools/inventory.ts",
+    "audit:assets": "bun run tools/audit-assets.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.14"
+  }
+}

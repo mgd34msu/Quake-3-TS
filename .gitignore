@@ -1,0 +1,50 @@
+# Dependencies and generated build/check output.
+node_modules/
+dist/
+.artifacts/
+coverage/
+
+# Reference archives and game data must stay outside the source repository.
+*.bundle
+*.zip
+*.[pP][kK]3
+/baseq3/
+/missionpack/
+
+# Keys and local environment credentials.
+[qQ]3[kK][eE][yY]
+[qQ]3[kK][eE][yY].*
+[qQ][uU][aA][kK][eE]3[cC][dD][kK][eE][yY]
+[qQ][uU][aA][kK][eE]3[cC][dD][kK][eE][yY].*
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Runtime state, recordings and captures.
+[qQ]3[cC][oO][nN][fF][iI][gG].[cC][fF][gG]
+[qQ]3[cC][oO][nN][fF][iI][gG].[cC][fF][gG].*
+servercache.dat
+journal.dat
+journaldata.dat
+*.dm_[0-9]*
+/demos/
+/screenshots/
+/videos/
+*.log
+
+# Crash reports, profiling output and temporary files.
+/core
+core.[0-9]*
+*.core
+*.dmp
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+/tmp/
+/temp/
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store

@@ -1,0 +1,56 @@
+import { expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { CommonFileState } from "../src/assets/filesystem-state.ts";
+import { KeyCode } from "../src/core/key-codes.ts";
+import { SoundOutput } from "../src/engine/sound-output.ts";
+import { BaseConfirmMenu } from "../src/ui/base/confirm.ts";
+import { BaseLoadConfigMenu } from "../src/ui/base/load-config.ts";
+import { setCursorToItem } from "../src/ui/base/framework.ts";
+import { itemAt, MenuEvent, MenuFlag } from "../src/ui/base/state.ts";
+import { baseFixture } from "./base-ui-fixture.ts";
+
+test("load config preserves bounded listing, suffix stripping, arrow callbacks, append-before-pop and cache-before-reset", async () => {
+  const f = await baseFixture(), directory = mkdtempSync(join(tmpdir(), "quake3-load-config-")), sound = new SoundOutput();
+  const files = new CommonFileState({ dataPath: directory, homePath: directory, cdPath: null, product: "baseq3" }, text => { f.prints.push(text); }, sound, f.cvars);
+  try {
+    mkdirSync(join(directory, "baseq3"));
+    writeFileSync(join(directory, "baseq3/default.cfg"), "fixture\n");
+    for (let n = 0; n < 140; n++) writeFileSync(join(directory, "baseq3", `n${n}.CFG`), "fixture\n");
+    writeFileSync(join(directory, "baseq3/a.b.cfg"), "fixture\n");
+    await files.initialize({ checksumFeed: 0, random: () => 0 }, () => {});
+    const owner = new BaseLoadConfigMenu(f.state, files), parent = new BaseConfirmMenu(f.state);
+    await parent.show("parent", null, null);
+    const get = files.current.getFileList.bind(files.current), calls: string[] = [];
+    files.current.getFileList = (path, extension, destination) => { calls.push(`${path}:${extension}:${destination.length}`); return get(path, extension, destination); };
+    f.registrations.length = 0; await owner.cache(); expect(owner.menu.items).toEqual([]);
+    expect(f.registrations).toEqual(["back_0", "back_1", "load_0", "load_1", "frame2_l", "frame1_r", "arrows_horz_0", "arrows_horz_left", "arrows_horz_right"].map(name => `shader:menu/art/${name}`));
+    await owner.show(); expect(calls).toEqual([":cfg:2048"]);
+    const list = itemAt(owner.menu.items, 3); if (list.kind !== "scroll") throw new Error("Missing source list");
+    expect(list.numitems).toBe(128); expect(list.itemnames).toContain("A.B");
+    expect([list.width, list.height, list.columns, list.separation]).toEqual([16, 14, 3, 3]);
+    const right = itemAt(owner.menu.items, 6), left = itemAt(owner.menu.items, 5), go = itemAt(owner.menu.items, 8);
+    if (right.common.callback === null || left.common.callback === null || go.common.callback === null) throw new Error("Missing callback");
+    expect([left.common.id, right.common.id]).toEqual([13, 14]);
+    await right.common.callback(right, MenuEvent.GotFocus); expect(list.curvalue).toBe(0);
+    await right.common.callback(right, MenuEvent.Activated); expect(list.curvalue).toBe(14);
+    await left.common.callback(left, MenuEvent.Activated); expect(list.curvalue).toBe(0);
+    list.curvalue = list.itemnames.indexOf("A.B");
+    const append = f.consoleCommands.append.bind(f.consoleCommands), order: string[] = [];
+    f.consoleCommands.append = text => { order.push(`append:${f.state.menuDepth}`); append(text); };
+    await go.common.callback(go, MenuEvent.Activated);
+    expect(order).toEqual(["append:2"]); expect(f.consoleCommands.pendingText).toBe("exec A.B\n"); expect(f.state.activeMenu).toBe(parent.menu);
+    await owner.show(); const menu = owner.menu, records = [...menu.items];
+    const register = f.resources.registerShaderNoMip.bind(f.resources), failure = new Error("cache failed");
+    f.resources.registerShaderNoMip = async () => { expect(menu.items).toEqual(records); throw failure; };
+    await expect(owner.show()).rejects.toBe(failure); expect(menu.items).toEqual(records);
+    f.resources.registerShaderNoMip = register;
+    files.current.getFileList = () => 0; await owner.show();
+    expect(list.itemnames).toEqual(["NO FILES FOUND."]);
+    expect(go.common.flags & (MenuFlag.Inactive | MenuFlag.Hidden)).toBe(MenuFlag.Inactive | MenuFlag.Hidden);
+    await setCursorToItem(f.state, menu, itemAt(menu.items, 7));
+    await f.keys.keyEvent(KeyCode.Enter, true, 10); await f.keys.keyEvent(KeyCode.Enter, false, 11);
+    expect(f.state.activeMenu).toBe(parent.menu); expect(f.consoleCommands.pendingText).toBe("exec A.B\n");
+  } finally { files.close(); sound.close(); f.close(); rmSync(directory, { recursive: true, force: true }); }
+});

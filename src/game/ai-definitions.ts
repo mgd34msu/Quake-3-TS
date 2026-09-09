@@ -1,0 +1,347 @@
+// Ported from id Software's game/ai_main.h, ai_dmq3.h, ai_dmnet.h, inv.h, chars.h, match.h and syn.h.
+// Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
+
+export { MAX_ITEMS } from "../shared/definitions.ts";
+
+export const BOT_SETTINGS_PATH_LENGTH = 144;
+export const MAX_PROXMINES = 64;
+export const MAX_ACTIVATESTACK = 8;
+export const MAX_ACTIVATEAREAS = 32;
+export const MAX_WAYPOINTS = 128;
+export const MAX_NODESWITCHES = 50;
+
+export enum BotFlag {
+  STRAFERIGHT = 1,
+  ATTACKED = 2,
+  ATTACKJUMPED = 4,
+  AIMATENEMY = 8,
+  AVOIDRIGHT = 16,
+  IDEALVIEWSET = 32,
+  FIGHTSUICIDAL = 64,
+}
+
+export enum BotLongTermGoal {
+  NONE = 0,
+  TEAMHELP = 1,
+  TEAMACCOMPANY = 2,
+  DEFENDKEYAREA = 3,
+  GETFLAG = 4,
+  RUSHBASE = 5,
+  RETURNFLAG = 6,
+  CAMP = 7,
+  CAMPORDER = 8,
+  PATROL = 9,
+  GETITEM = 10,
+  KILL = 11,
+  HARVEST = 12,
+  ATTACKENEMYBASE = 13,
+  MAKELOVE_UNDER = 14,
+  MAKELOVE_ONTOP = 15,
+}
+
+export const TEAM_HELP_TIME = 60;
+export const TEAM_ACCOMPANY_TIME = 600;
+export const TEAM_DEFENDKEYAREA_TIME = 600;
+export const TEAM_CAMP_TIME = 600;
+export const TEAM_PATROL_TIME = 600;
+export const TEAM_LEAD_TIME = 600;
+export const TEAM_GETITEM_TIME = 60;
+export const TEAM_KILL_SOMEONE = 180;
+export const TEAM_ATTACKENEMYBASE_TIME = 600;
+export const TEAM_HARVEST_TIME = 120;
+export const CTF_GETFLAG_TIME = 600;
+export const CTF_RUSHBASE_TIME = 120;
+export const CTF_RETURNFLAG_TIME = 180;
+export const CTF_ROAM_TIME = 60;
+
+export enum BotPatrolFlag { LOOP = 1, REVERSE = 2, BACK = 4 }
+export enum BotTeamTaskPreference { DEFENDER = 1, ATTACKER = 2 }
+export enum BotCtfStrategy { AGRESSIVE = 1 }
+export enum BotPresenceType { NONE = 1, NORMAL = 2, CROUCH = 4 }
+export enum BotCtfFlag { NONE = 0, RED = 1, BLUE = 2 }
+export const CTF_SKIN_REDTEAM = "red";
+export const CTF_SKIN_BLUETEAM = "blue";
+
+/** inv.h indexes are shared by both products, including its unused holes. */
+export enum BotInventory {
+  NONE = 0,
+  ARMOR = 1,
+  GAUNTLET = 4,
+  SHOTGUN = 5,
+  MACHINEGUN = 6,
+  GRENADELAUNCHER = 7,
+  ROCKETLAUNCHER = 8,
+  LIGHTNING = 9,
+  RAILGUN = 10,
+  PLASMAGUN = 11,
+  BFG10K = 13,
+  GRAPPLINGHOOK = 14,
+  NAILGUN = 15,
+  PROXLAUNCHER = 16,
+  CHAINGUN = 17,
+  SHELLS = 18,
+  BULLETS = 19,
+  GRENADES = 20,
+  CELLS = 21,
+  LIGHTNINGAMMO = 22,
+  ROCKETS = 23,
+  SLUGS = 24,
+  BFGAMMO = 25,
+  NAILS = 26,
+  MINES = 27,
+  BELT = 28,
+  HEALTH = 29,
+  TELEPORTER = 30,
+  MEDKIT = 31,
+  KAMIKAZE = 32,
+  PORTAL = 33,
+  INVULNERABILITY = 34,
+  QUAD = 35,
+  ENVIRONMENTSUIT = 36,
+  HASTE = 37,
+  INVISIBILITY = 38,
+  REGEN = 39,
+  FLIGHT = 40,
+  SCOUT = 41,
+  GUARD = 42,
+  DOUBLER = 43,
+  AMMOREGEN = 44,
+  REDFLAG = 45,
+  BLUEFLAG = 46,
+  NEUTRALFLAG = 47,
+  REDCUBE = 48,
+  BLUECUBE = 49,
+  ENEMY_HORIZONTAL_DIST = 200,
+  ENEMY_HEIGHT = 201,
+  NUM_VISIBLE_ENEMIES = 202,
+  NUM_VISIBLE_TEAMMATES = 203,
+}
+
+/** Model indexes from inv.h; runtime item definitions remain shared/items.ts. */
+export enum BotModelIndex {
+  ARMORSHARD = 1,
+  ARMORCOMBAT = 2,
+  ARMORBODY = 3,
+  HEALTHSMALL = 4,
+  HEALTH = 5,
+  HEALTHLARGE = 6,
+  HEALTHMEGA = 7,
+  GAUNTLET = 8,
+  SHOTGUN = 9,
+  MACHINEGUN = 10,
+  GRENADELAUNCHER = 11,
+  ROCKETLAUNCHER = 12,
+  LIGHTNING = 13,
+  RAILGUN = 14,
+  PLASMAGUN = 15,
+  BFG10K = 16,
+  GRAPPLINGHOOK = 17,
+  SHELLS = 18,
+  BULLETS = 19,
+  GRENADES = 20,
+  CELLS = 21,
+  LIGHTNINGAMMO = 22,
+  ROCKETS = 23,
+  SLUGS = 24,
+  BFGAMMO = 25,
+  TELEPORTER = 26,
+  MEDKIT = 27,
+  QUAD = 28,
+  ENVIRONMENTSUIT = 29,
+  HASTE = 30,
+  INVISIBILITY = 31,
+  REGEN = 32,
+  FLIGHT = 33,
+  REDFLAG = 34,
+  BLUEFLAG = 35,
+  KAMIKAZE = 36,
+  PORTAL = 37,
+  INVULNERABILITY = 38,
+  NAILS = 39,
+  MINES = 40,
+  BELT = 41,
+  SCOUT = 42,
+  GUARD = 43,
+  DOUBLER = 44,
+  AMMOREGEN = 45,
+  NEUTRALFLAG = 46,
+  REDCUBE = 47,
+  BLUECUBE = 48,
+  NAILGUN = 49,
+  PROXLAUNCHER = 50,
+  CHAINGUN = 51,
+}
+
+export enum BotCharacteristic {
+  NAME = 0,
+  GENDER = 1,
+  ATTACK_SKILL = 2,
+  WEAPONWEIGHTS = 3,
+  VIEW_FACTOR = 4,
+  VIEW_MAXCHANGE = 5,
+  REACTIONTIME = 6,
+  AIM_ACCURACY = 7,
+  AIM_ACCURACY_MACHINEGUN = 8,
+  AIM_ACCURACY_SHOTGUN = 9,
+  AIM_ACCURACY_ROCKETLAUNCHER = 10,
+  AIM_ACCURACY_GRENADELAUNCHER = 11,
+  AIM_ACCURACY_LIGHTNING = 12,
+  AIM_ACCURACY_PLASMAGUN = 13,
+  AIM_ACCURACY_RAILGUN = 14,
+  AIM_ACCURACY_BFG10K = 15,
+  AIM_SKILL = 16,
+  AIM_SKILL_ROCKETLAUNCHER = 17,
+  AIM_SKILL_GRENADELAUNCHER = 18,
+  AIM_SKILL_PLASMAGUN = 19,
+  AIM_SKILL_BFG10K = 20,
+  CHAT_FILE = 21,
+  CHAT_NAME = 22,
+  CHAT_CPM = 23,
+  CHAT_INSULT = 24,
+  CHAT_MISC = 25,
+  CHAT_STARTENDLEVEL = 26,
+  CHAT_ENTEREXITGAME = 27,
+  CHAT_KILL = 28,
+  CHAT_DEATH = 29,
+  CHAT_ENEMYSUICIDE = 30,
+  CHAT_HITTALKING = 31,
+  CHAT_HITNODEATH = 32,
+  CHAT_HITNOKILL = 33,
+  CHAT_RANDOM = 34,
+  CHAT_REPLY = 35,
+  CROUCHER = 36,
+  JUMPER = 37,
+  WEAPONJUMPING = 38,
+  GRAPPLE_USER = 39,
+  ITEMWEIGHTS = 40,
+  AGGRESSION = 41,
+  SELFPRESERVATION = 42,
+  VENGEFULNESS = 43,
+  CAMPER = 44,
+  EASY_FRAGGER = 45,
+  ALERTNESS = 46,
+  FIRETHROTTLE = 47,
+  WALKER = 48,
+}
+
+export const BOT_CHAT_ESCAPE = "\u0019";
+
+export enum BotMatchContext {
+  MISC = 2,
+  INITIALTEAMCHAT = 4,
+  TIME = 8,
+  TEAMMATE = 16,
+  ADDRESSEE = 32,
+  PATROLKEYAREA = 64,
+  REPLYCHAT = 128,
+  CTF = 256,
+}
+
+export enum BotMessage {
+  NEWLEADER = 1,
+  ENTERGAME = 2,
+  HELP = 3,
+  ACCOMPANY = 4,
+  DEFENDKEYAREA = 5,
+  RUSHBASE = 6,
+  GETFLAG = 7,
+  STARTTEAMLEADERSHIP = 8,
+  STOPTEAMLEADERSHIP = 9,
+  WHOISTEAMLAEDER = 10,
+  WAIT = 11,
+  WHATAREYOUDOING = 12,
+  JOINSUBTEAM = 13,
+  LEAVESUBTEAM = 14,
+  CREATENEWFORMATION = 15,
+  FORMATIONPOSITION = 16,
+  FORMATIONSPACE = 17,
+  DOFORMATION = 18,
+  DISMISS = 19,
+  CAMP = 20,
+  CHECKPOINT = 21,
+  PATROL = 22,
+  LEADTHEWAY = 23,
+  GETITEM = 24,
+  KILL = 25,
+  WHEREAREYOU = 26,
+  RETURNFLAG = 27,
+  WHATISMYCOMMAND = 28,
+  WHICHTEAM = 29,
+  TASKPREFERENCE = 30,
+  ATTACKENEMYBASE = 31,
+  HARVEST = 32,
+  SUICIDE = 33,
+  ME = 100,
+  EVERYONE = 101,
+  MULTIPLENAMES = 102,
+  NAME = 103,
+  PATROLKEYAREA = 104,
+  MINUTES = 105,
+  SECONDS = 106,
+  FOREVER = 107,
+  FORALONGTIME = 108,
+  FORAWHILE = 109,
+  CHATALL = 200,
+  CHATTEAM = 201,
+  CHATTELL = 202,
+  CTF = 300,
+}
+
+export enum BotMatchSubtype {
+  SOMEWHERE = 0,
+  NEARITEM = 1,
+  ADDRESSED = 2,
+  METER = 4,
+  FEET = 8,
+  TIME = 16,
+  HERE = 32,
+  THERE = 64,
+  I = 128,
+  MORE = 256,
+  BACK = 512,
+  REVERSE = 1024,
+  SOMEONE = 2048,
+  GOTFLAG = 4096,
+  CAPTUREDFLAG = 8192,
+  RETURNEDFLAG = 16384,
+  TEAM = 32768,
+  ONEFLAG_CTF_GOTFLAG = 65535,
+  DEFENDER = 1,
+  ATTACKER = 2,
+  ROAMER = 4,
+}
+
+export enum BotMatchVariable {
+  THE_ENEMY = 7,
+  THE_TEAM = 7,
+  NETNAME = 0,
+  PLACE = 1,
+  FLAG = 1,
+  MESSAGE = 2,
+  ADDRESSEE = 2,
+  ITEM = 3,
+  TEAMMATE = 4,
+  TEAMNAME = 4,
+  ENEMY = 4,
+  KEYAREA = 5,
+  FORMATION = 5,
+  POSITION = 5,
+  NUMBER = 5,
+  TIME = 6,
+  NAME = 6,
+  MORE = 6,
+}
+
+export enum BotSynonymContext {
+  ALL = 0xffffffff,
+  NORMAL = 1,
+  NEARBYITEM = 2,
+  CTFREDTEAM = 4,
+  CTFBLUETEAM = 8,
+  REPLY = 16,
+  OBELISKREDTEAM = 32,
+  OBELISKBLUETEAM = 64,
+  HARVESTERREDTEAM = 128,
+  HARVESTERBLUETEAM = 256,
+  NAMES = 1024,
+}
