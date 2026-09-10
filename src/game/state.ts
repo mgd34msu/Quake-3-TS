@@ -55,7 +55,7 @@ export class ClientSession {
   spectatorClient = 0;
   wins = 0;
   losses = 0;
-  teamLeader = false;
+  teamLeader = 0;
 }
 
 /** Source clientPersistant_t survives respawn, but not ClientBegin reset. */

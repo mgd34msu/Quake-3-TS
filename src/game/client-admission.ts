@@ -267,7 +267,7 @@ export class ClientAdmissionRuntime {
       client.pers.teamInfo = overlay.length === 0 || gameAtoi(overlay) !== 0;
     }
     const teamTask = gameAtoi(clientInfoValue(userinfo, "teamtask"));
-    const teamLeader = client.sess.teamLeader ? 1 : 0;
+    const teamLeader = client.sess.teamLeader;
     const color1 = clientInfoValue(userinfo, "color1"), color2 = clientInfoValue(userinfo, "color2");
     let config: string;
     if ((entity.r.svFlags & ServerEntityFlags.BOT) !== 0) {

@@ -147,7 +147,7 @@ export class GameSessionManager {
       session.spectatorClient,
       session.wins,
       session.losses,
-      session.teamLeader ? 1 : 0,
+      session.teamLeader,
     ], MAX_STRING_CHARS);
     this.services.cvars.set(`session${clientNum}`, value);
   }
@@ -171,7 +171,7 @@ export class GameSessionManager {
     const teamLeader = scan.value;
     session.sessionTeam = sessionTeam;
     session.spectatorState = spectatorState;
-    session.teamLeader = teamLeader !== 0;
+    session.teamLeader = teamLeader;
   }
 
   initializeClient(clientNum: number, userinfo: SessionUserinfo): void {

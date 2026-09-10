@@ -78,7 +78,7 @@ describe("game sessions", () => {
       session.spectatorClient = -2;
       session.wins = 17;
       session.losses = 9;
-      session.teamLeader = true;
+      session.teamLeader = 1;
       setup.manager.writeClient(1);
       expect(setup.cvars.get("session1")).toBe("1 -./,),(-*,( 2 -2 17 9 1");
 
@@ -90,7 +90,7 @@ describe("game sessions", () => {
       expect(session.spectatorClient).toBe(-2);
       expect(session.wins).toBe(4);
       expect(session.losses).toBe(6);
-      expect(session.teamLeader).toBe(true);
+      expect(session.teamLeader).toBe(-9);
     }
   });
 
@@ -101,7 +101,7 @@ describe("game sessions", () => {
     session.spectatorClient = 19;
     session.wins = 20;
     session.losses = 21;
-    session.teamLeader = true;
+    session.teamLeader = 1;
     setup.cvars.values.set("session0", "1 77 ");
     setup.manager.readClient(0);
     expect(session).toMatchObject({
@@ -111,7 +111,7 @@ describe("game sessions", () => {
       spectatorClient: 0,
       wins: 0,
       losses: 0,
-      teamLeader: false,
+      teamLeader: 0,
     });
 
     setup.cvars.values.set("session0", "1");
@@ -120,9 +120,9 @@ describe("game sessions", () => {
     expect(() => setup.manager.readClient(0)).toThrow("byte characters");
   });
 
-  test("restores and saves complete raw session team and spectator integers for both products", () => {
+  test("restores and saves complete raw session team, spectator and leader integers for both products", () => {
     for (const product of ["baseq3", "missionpack"] satisfies readonly Product[]) {
-      for (const value of ["3 0 99 -1 0 0 0", "99 12 1 4 5 6 0", "-7 13 -99 7 8 9 1"]) {
+      for (const value of ["3 0 99 -1 0 0 0", "99 12 1 4 5 6 0", "-7 13 -99 7 8 9 1", "3 0 99 -1 0 0 9", "3 0 99 -1 0 0 -1"]) {
         const setup = fixture(product);
         setup.cvars.values.set("session0", value);
         setup.manager.readClient(0);
@@ -251,7 +251,7 @@ describe("game sessions", () => {
     connected.sess.wins = 2;
     connecting.pers.connected = ConnectionState.CONNECTING;
     last.pers.connected = ConnectionState.CONNECTED;
-    last.sess.teamLeader = true;
+    last.sess.teamLeader = 1;
     setup.manager.writeWorld();
     expect(setup.effects).toEqual([
       "cvar:session:5",

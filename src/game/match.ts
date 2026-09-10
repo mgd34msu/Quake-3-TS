@@ -441,22 +441,22 @@ export class MatchRuntime {
     if (client.sess.sessionTeam !== team) { this.printTeam(team, gameFormat('print "%s is not on the team anymore\n"', [client.pers.netname], 1024)); return; }
     for (let index = 0; index < this.host.pool.maxClients; index++) {
       const other = this.host.pool.clientAt(index);
-      if (other.sess.sessionTeam === team && other.sess.teamLeader) { other.sess.teamLeader = false; this.host.clientUserinfoChanged(index); }
+      if (other.sess.sessionTeam === team && other.sess.teamLeader !== 0) { other.sess.teamLeader = 0; this.host.clientUserinfoChanged(index); }
     }
-    client.sess.teamLeader = true; this.host.clientUserinfoChanged(clientNum);
+    client.sess.teamLeader = 1; this.host.clientUserinfoChanged(clientNum);
     this.printTeam(team, gameFormat('print "%s is the new team leader\n"', [client.pers.netname], 1024));
   }
   checkTeamLeader(team: Team): void {
     for (let index = 0; index < this.host.pool.maxClients; index++) {
-      const client = this.host.pool.clientAt(index); if (client.sess.sessionTeam === team && client.sess.teamLeader) return;
+      const client = this.host.pool.clientAt(index); if (client.sess.sessionTeam === team && client.sess.teamLeader !== 0) return;
     }
     for (let index = 0; index < this.host.pool.maxClients; index++) {
       const client = this.host.pool.clientAt(index);
-      if (client.sess.sessionTeam === team && (this.host.pool.at(index).r.svFlags & ServerEntityFlags.BOT) === 0) { client.sess.teamLeader = true; break; }
+      if (client.sess.sessionTeam === team && (this.host.pool.at(index).r.svFlags & ServerEntityFlags.BOT) === 0) { client.sess.teamLeader = 1; break; }
     }
     // The second source loop is unconditional and may make a preceding bot a second leader.
     for (let index = 0; index < this.host.pool.maxClients; index++) {
-      const client = this.host.pool.clientAt(index); if (client.sess.sessionTeam === team) { client.sess.teamLeader = true; break; }
+      const client = this.host.pool.clientAt(index); if (client.sess.sessionTeam === team) { client.sess.teamLeader = 1; break; }
     }
   }
   checkTeamVote(team: Team): void {

@@ -333,9 +333,9 @@ describe("votes, leaders and password cvars", () => {
     f.match.checkVote(); expect(f.calls).toEqual(["console:g_gametype 3\n", 'send:-1:print "Vote failed.\n"', "config:8:"]);
   });
   test("team vote passes globally, dispatches leader immediately and clears correct config slot", () => {
-    const f = fixture(); f.player(0, 0, Team.TEAM_RED); f.player(1, 0, Team.TEAM_RED); f.pool.clientAt(0).sess.teamLeader = true;
+    const f = fixture(); f.player(0, 0, Team.TEAM_RED); f.player(1, 0, Team.TEAM_RED); f.pool.clientAt(0).sess.teamLeader = 1;
     f.state.numTeamVotingClients[0] = 2; Object.assign(f.state.teamVotes[0], { time: 1, yes: 2, string: "leader 1" });
-    f.match.checkTeamVote(Team.TEAM_RED); expect(f.pool.clientAt(0).sess.teamLeader).toBe(false); expect(f.pool.clientAt(1).sess.teamLeader).toBe(true);
+    f.match.checkTeamVote(Team.TEAM_RED); expect(f.pool.clientAt(0).sess.teamLeader).toBe(0); expect(f.pool.clientAt(1).sess.teamLeader).toBe(1);
     expect(f.calls.slice(0, 3)).toEqual(['send:-1:print "Team vote passed.\n"', "userinfo:0", "userinfo:1"]);
     expect(f.calls.at(-1)).toBe("config:12:");
     f.state.numTeamVotingClients[1] = 2; Object.assign(f.state.teamVotes[1], { time: 1, yes: 2, string: "say blue" });
@@ -349,9 +349,23 @@ describe("votes, leaders and password cvars", () => {
     f.calls.length = 0; Object.assign(f.state.teamVotes[1], { time: 1, yes: 5, no: 0 }); f.state.time = 30001;
     f.match.checkTeamVote(Team.TEAM_BLUE); expect(f.calls).toEqual(['send:-1:print "Team vote failed.\n"', "config:13:"]);
   });
+  test("raw nonzero leaders prevent fallback and are cleared by SetLeader", () => {
+    for (const leader of [9, -1]) {
+      const f = fixture(); f.player(0, 0, Team.TEAM_RED); f.player(1, 0, Team.TEAM_RED);
+      f.pool.clientAt(0).sess.teamLeader = leader;
+      f.match.checkTeamLeader(Team.TEAM_RED);
+      expect(f.pool.clientAt(0).sess.teamLeader).toBe(leader);
+      expect(f.pool.clientAt(1).sess.teamLeader).toBe(0);
+      expect(f.calls).toEqual([]);
+      f.match.setLeader(Team.TEAM_RED, 1);
+      expect(f.pool.clientAt(0).sess.teamLeader).toBe(0);
+      expect(f.pool.clientAt(1).sess.teamLeader).toBe(1);
+      expect(f.calls.slice(0, 2)).toEqual(["userinfo:0", "userinfo:1"]);
+    }
+  });
   test("source leader fallback can select both bot and human and does not refresh userinfo", () => {
     const f = fixture(); f.player(0, 0, Team.TEAM_RED).r.svFlags = ServerEntityFlags.BOT; f.player(1, 0, Team.TEAM_RED);
-    f.match.checkTeamLeader(Team.TEAM_RED); expect(f.pool.clientAt(0).sess.teamLeader).toBe(true); expect(f.pool.clientAt(1).sess.teamLeader).toBe(true);
+    f.match.checkTeamLeader(Team.TEAM_RED); expect(f.pool.clientAt(0).sess.teamLeader).toBe(1); expect(f.pool.clientAt(1).sess.teamLeader).toBe(1);
     expect(f.calls).toEqual([]);
     f.pool.clientAt(1).pers.connected = ConnectionState.DISCONNECTED; f.match.setLeader(Team.TEAM_RED, 1);
     expect(f.calls).toEqual(['send:0:print "player1 is not connected\n"', 'send:1:print "player1 is not connected\n"']);

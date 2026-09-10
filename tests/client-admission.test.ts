@@ -110,7 +110,7 @@ describe("ClientUserinfoChanged", () => {
     const f = fixture({ gameType: GameType.GT_CTF });
     const client = f.pool.clientAt(0);
     client.sess.sessionTeam = Team.TEAM_RED; client.sess.wins = 2; client.sess.losses = 3;
-    client.sess.teamLeader = true; client.pers.connected = ConnectionState.CONNECTED; client.pers.netname = "Old";
+    client.sess.teamLeader = 1; client.pers.connected = ConnectionState.CONNECTED; client.pers.netname = "Old";
     f.userinfos[0] = "\\NaMe\\  ^1Alpha    Beta\\name\\ignored\\ip\\localhost\\cg_predictItems\\4294967297" +
       "\\handicap\\87\\team_model\\team/body\\team_headmodel\\team/head\\model\\wrong\\headmodel\\wrong" +
       "\\g_redteam\\Stroggs\\g_blueteam\\Pagans\\color1\\4\\color2\\5\\teamoverlay\\0\\teamtask\\2";
@@ -126,6 +126,23 @@ describe("ClientUserinfoChanged", () => {
     f.runtime.userinfoChanged(0);
     expect(client.pers.localClient).toBe(true);
     expect(client.pers.predictItemPickup).toBe(false);
+  });
+
+  test("publishes raw session leader integers for humans and bots in both products", () => {
+    for (const product of ["baseq3", "missionpack"] satisfies Product[]) {
+      for (const leader of [9, -1]) {
+        for (const bot of [false, true]) {
+          const f = fixture({ product, gameType: GameType.GT_CTF });
+          const client = f.pool.clientAt(0);
+          client.sess.sessionTeam = Team.TEAM_RED; client.sess.teamLeader = leader;
+          if (bot) f.pool.at(0).r.svFlags |= ServerEntityFlags.BOT;
+          f.userinfos[0] = "\\name\\Leader";
+          f.runtime.userinfoChanged(0);
+          expect(f.calls.find(value => value.startsWith("config:544:"))).toEndWith(`\\tl\\${leader}`);
+          expect(client.sess.teamLeader).toBe(leader);
+        }
+      }
+    }
   });
 
   test("preserves invalid-info fallback and scoreboard naming for both products", () => {

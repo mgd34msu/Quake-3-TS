@@ -20,8 +20,9 @@ import { TeamArenaCatalog } from "../src/ui/team-arena/catalog.ts";
 import { TeamArenaGameInfo, TeamArenaMenuBuffer, infoSlot } from "../src/ui/team-arena/game-info.ts";
 import { TeamArenaUiMemory } from "../src/ui/team-arena/memory.ts";
 import { sourceZip } from "./pk3-source-fixture.ts";
+import type { SourceZipEntry } from "./pk3-source-fixture.ts";
 
-async function fixture(entries: Readonly<Record<string, string>> | null, packed = false) {
+async function fixture(entries: Readonly<Record<string, string>> | null, packed: boolean | readonly SourceZipEntry[] = false) {
   const directory = mkdtempSync(join(tmpdir(), "quake3-team-catalog-"));
   mkdirSync(join(directory, "missionpack"));
   if (entries !== null) {
@@ -29,9 +30,9 @@ async function fixture(entries: Readonly<Record<string, string>> | null, packed 
     writeFileSync(join(directory, "baseq3", "default.cfg"), "fixture\n");
     if (packed) {
       const bytes = (text: string): Uint8Array => Uint8Array.from(text, byte => byte.charCodeAt(0));
-      writeFileSync(join(directory, "missionpack", "pak0.pk3"), sourceZip(Object.entries(entries).map(([path, text]) => ({
+      writeFileSync(join(directory, "missionpack", "pak0.pk3"), sourceZip(packed === true ? Object.entries(entries).map(([path, text]) => ({
         name: bytes(path), data: bytes(text), method: 8, utf8: false,
-      }))));
+      })) : packed));
     } else for (const [name, text] of Object.entries(entries)) {
       const path = join(directory, "missionpack", name);
       mkdirSync(dirname(path), { recursive: true });
@@ -67,6 +68,37 @@ async function fixture(entries: Readonly<Record<string, string>> | null, packed 
     throw error;
   }
 }
+
+test("Team Arena catalog opens distinct raw byte script names from the actual packed file list", async () => {
+  const bytes = (text: string): Uint8Array => Uint8Array.from(text, byte => byte.charCodeAt(0));
+  const definitions: readonly (readonly [string, string, boolean])[] = [
+    ["\xe9", "Raw", false], ["\xc3\xa9", "Utf8", true], ["\xff", "Invalid", true],
+  ];
+  const entries: SourceZipEntry[] = [];
+  for (const [name, identity, utf8] of definitions) {
+    entries.push({ name: bytes(`scripts/${name}.arena`), data: bytes(`{ map ${identity} type ffa } { map Duplicate longname ${identity} type ffa }`), method: 8, utf8 });
+    entries.push({ name: bytes(`scripts/${name}.bot`), data: bytes(`{ name ${identity} } { name Duplicate origin ${identity} }`), method: 8, utf8 });
+  }
+  const f = await fixture({}, entries);
+  try {
+    for (const extension of [".arena", ".bot"]) {
+      const listed = new Uint8Array(1024);
+      expect(f.files.current.getFileList("scripts", extension, listed)).toBe(3);
+      const expected = bytes(definitions.map(([name]) => `${name}${extension}\0`).join(""));
+      expect<Uint8Array>(listed.subarray(0, expected.length)).toEqual(expected);
+    }
+    f.catalog.loadArenas(); f.catalog.loadBots();
+    expect(f.game.mapCount).toBe(6);
+    expect(f.catalog.getNumBots()).toBe(6);
+    expect(f.game.mapList.slice(0, f.game.mapCount).map(row => row.mapLoadName))
+      .toEqual(["Raw", "Duplicate", "Utf8", "Duplicate", "Invalid", "Duplicate"]);
+    expect(f.game.mapList.slice(0, f.game.mapCount).filter(row => row.mapLoadName === "Duplicate").map(row => row.mapName))
+      .toEqual(["Raw", "Utf8", "Invalid"]);
+    expect(Array.from({ length: 6 }, (_, index) => f.catalog.getBotNameByNumber(index)))
+      .toEqual(["Raw", "Duplicate", "Utf8", "Duplicate", "Invalid", "Duplicate"]);
+    expect(infoValueForKey(f.catalog.getBotInfoByName("duplicate") ?? "", "origin")).toBe("Raw");
+  } finally { f.close(); }
+});
 
 test("UI_ParseInfos writes missing values into the retained COM token before parsing resumes", async () => {
   const f = await fixture({ "scripts/arenas.txt": "{ map\n longname Empty }" });

@@ -309,12 +309,12 @@ export class GameCommandRuntime {
     client.sess.sessionTeam = team;
     client.sess.spectatorState = spectatorState;
     client.sess.spectatorClient = spectatorClient;
-    client.sess.teamLeader = false;
+    client.sess.teamLeader = 0;
     if (team === Team.TEAM_RED || team === Team.TEAM_BLUE) {
       let leader: GameEntity | null = null;
       for (let slot = 0; slot < this.host.pool.maxClients; slot++) {
         const candidate = this.host.pool.clientAt(slot);
-        if (candidate.pers.connected !== ConnectionState.DISCONNECTED && candidate.sess.sessionTeam === team && candidate.sess.teamLeader) { leader = this.host.pool.at(slot); break; }
+        if (candidate.pers.connected !== ConnectionState.DISCONNECTED && candidate.sess.sessionTeam === team && candidate.sess.teamLeader !== 0) { leader = this.host.pool.at(slot); break; }
       }
       if (leader === null || ((entity.r.svFlags & ServerEntityFlags.BOT) === 0 && (leader.r.svFlags & ServerEntityFlags.BOT) !== 0)) this.host.match.setLeader(team, entity.slot);
     }

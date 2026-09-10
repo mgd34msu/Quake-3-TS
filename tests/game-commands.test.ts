@@ -329,10 +329,25 @@ describe("cheats and team/follow service boundaries", () => {
     expect(f.sends).toEqual([{ client: 0, text: 'cp "Red team has too many players.\n"' }]);
   });
 
+  test("team changes clear the arriving leader and recognize a raw nonzero destination leader", () => {
+    for (const leader of [9, -1]) {
+      const f = setup(); f.settings.gameType = GameType.GT_TEAM; f.client.sess.sessionTeam = Team.TEAM_RED;
+      f.client.sess.teamLeader = leader;
+      const incumbent = f.pool.clientAt(1);
+      incumbent.pers.connected = ConnectionState.CONNECTED;
+      incumbent.sess.sessionTeam = Team.TEAM_BLUE; incumbent.sess.teamLeader = leader;
+      f.run("team blue");
+      expect(f.client.sess.teamLeader).toBe(0);
+      expect(incumbent.sess.teamLeader).toBe(leader);
+      expect(f.calls).not.toContain("leader:2:0");
+      expect(f.calls).toContain("checkLeader:1");
+    }
+  });
+
   test("disconnected former team leaders do not prevent appointing the arriving player", () => {
     const f = setup(); f.settings.gameType = GameType.GT_TEAM; f.client.sess.sessionTeam = Team.TEAM_RED;
     const departed = f.pool.clientAt(1); departed.pers.connected = ConnectionState.DISCONNECTED;
-    departed.sess.sessionTeam = Team.TEAM_BLUE; departed.sess.teamLeader = true;
+    departed.sess.sessionTeam = Team.TEAM_BLUE; departed.sess.teamLeader = 1;
     f.run("team blue"); expect(f.calls).toContain("leader:2:0");
   });
 
@@ -433,7 +448,7 @@ describe("commands through the authoritative game runtime", () => {
       f.run("callteamvote leader 0"); f.run("teamvote yes", 1);
       f.runtime.runFrame(1100);
       expect(f.runtime.level.vote.time).toBe(0); expect(f.runtime.level.vote.executeTime).toBe(4100);
-      expect(f.runtime.pool.clientAt(0).sess.teamLeader).toBe(true); expect(f.runtime.pool.clientAt(1).sess.teamLeader).toBe(false);
+      expect(f.runtime.pool.clientAt(0).sess.teamLeader).toBe(1); expect(f.runtime.pool.clientAt(1).sess.teamLeader).toBe(0);
       expect(f.runtime.level.teamVotes.every(vote => vote.time === 0)).toBe(true);
       f.runtime.runFrame(4101); expect(f.console).toEqual(['fraglimit "7"\n']);
       f.runtime.shutdown(false);
