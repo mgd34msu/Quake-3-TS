@@ -2,6 +2,7 @@
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 
 import { CvarFlag } from "../core/cvar.ts";
+import { NETWORK_DEFAULTS } from "../core/network-defaults.ts";
 import type { CvarRegistry } from "../core/cvar.ts";
 
 type ServerCvarRegistration = readonly [name: string, defaultValue: string, flags: number];
@@ -35,7 +36,7 @@ const registrations: readonly ServerCvarRegistration[] = [
   ["sv_zombietime", "2", CvarFlag.Temporary],
   ["nextmap", "", CvarFlag.Temporary],
   ["sv_allowDownload", "0", CvarFlag.ServerInfo],
-  ["sv_master1", "master.quake3arena.com", CvarFlag.None],
+  ["sv_master1", NETWORK_DEFAULTS.masterServer, CvarFlag.None],
   ["sv_master2", "", CvarFlag.Archive],
   ["sv_master3", "", CvarFlag.Archive],
   ["sv_master4", "", CvarFlag.Archive],

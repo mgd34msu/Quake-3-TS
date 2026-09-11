@@ -6,6 +6,7 @@ import type { CvarRegistry } from "../core/cvar.ts";
 import { infoSetValueForKey, infoValueForKey } from "../core/info-string.ts";
 import type { LinuxNativeRandom } from "../core/native-random.ts";
 import { nativeAtoi } from "../core/native-numeric.ts";
+import { MASTER_SERVER_PORT, NETWORK_DEFAULTS } from "../core/network-defaults.ts";
 import type { Ipv4Address } from "../platform/network.ts";
 import { decodeConnectionless, encodeConnectionlessText } from "../protocol/connectionless.ts";
 import type { ConnectionlessPacket } from "../protocol/connectionless.ts";
@@ -87,12 +88,12 @@ export class ServerConnectionlessRuntime {
     return { kind: "ipv4", host: [...address.host], port: address.port };
   }
   private async resolveAuthorizeAddress(state: ServerStaticState): Promise<boolean> {
-    this.host.print("Resolving authorize.quake3arena.com\n");
-    const address = await this.resolve("authorize.quake3arena.com", 27952);
+    this.host.print(`Resolving ${NETWORK_DEFAULTS.authorizeServer}\n`);
+    const address = await this.resolve(NETWORK_DEFAULTS.authorizeServer, NETWORK_DEFAULTS.authorizePort);
     this.control.assertCurrentOperation();
     if (address === null) { state.authorizeAddress = { kind: "failed" }; this.host.print("Couldn't resolve address\n"); return false; }
-    state.authorizeAddress = { kind: "resolved", address: { kind: "ipv4", host: [...address.host], port: 27952 } };
-    this.host.print(`authorize.quake3arena.com resolved to ${addressString(state.authorizeAddress.address)}\n`);
+    state.authorizeAddress = { kind: "resolved", address: { kind: "ipv4", host: [...address.host], port: NETWORK_DEFAULTS.authorizePort } };
+    this.host.print(`${NETWORK_DEFAULTS.authorizeServer} resolved to ${addressString(state.authorizeAddress.address)}\n`);
     return true;
   }
   async banUser(client: ServerClient): Promise<void> {
@@ -262,9 +263,9 @@ export class ServerConnectionlessRuntime {
           }
           name = sourceString(this.cvar(key).value);
           // Pinned source uses strstr(":", name), not strstr(name, ":").
-          if (address.kind === "ipv4") address = { kind: "ipv4", host: [...address.host], port: ":".includes(name) ? address.port : 27950 };
+          if (address.kind === "ipv4") address = { kind: "ipv4", host: [...address.host], port: ":".includes(name) ? address.port : MASTER_SERVER_PORT };
           this.control.masterAddresses[index] = owned(address);
-          const resolved = address.kind === "ipv4" ? addressString(address) : "0.0.0.0:27950";
+          const resolved = address.kind === "ipv4" ? addressString(address) : `0.0.0.0:${MASTER_SERVER_PORT}`;
           this.host.print(`${name} resolved to ${resolved}\n`);
         }
         const address = this.control.masterAddresses[index];

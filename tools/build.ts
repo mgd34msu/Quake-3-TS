@@ -1,6 +1,25 @@
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { WorkspaceSnapshot } from "./workspace-snapshot.ts";
+import { NETWORK_DEFAULTS, parseNetworkDefaults } from "../src/core/network-defaults.ts";
+import { networkDefaultsPlugin } from "./network-build-defaults.ts";
+
+let masterServer = NETWORK_DEFAULTS.masterServer;
+let authorizeServer = NETWORK_DEFAULTS.authorizeServer;
+let authorizePort = String(NETWORK_DEFAULTS.authorizePort);
+const args = process.argv.slice(2);
+for (let index = 0; index < args.length; index++) {
+  const flag = args[index];
+  if (flag !== "--master-server" && flag !== "--auth-server" && flag !== "--auth-port") {
+    throw new Error(`Unknown build option: ${flag}`);
+  }
+  const value = args[++index];
+  if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
+  if (flag === "--master-server") masterServer = value;
+  else if (flag === "--auth-server") authorizeServer = value;
+  else authorizePort = value;
+}
+const networkDefaults = parseNetworkDefaults({ masterServer, authorizeServer, authorizePort });
 
 const workspace = process.cwd();
 const snapshot = await WorkspaceSnapshot.capture(workspace);
@@ -15,6 +34,7 @@ const result = await Bun.build({
   entrypoints: [join(snapshotPath, "src/main.ts"), join(snapshotPath, "src/render/cpu/triangle-worker.ts"),
     join(snapshotPath, "src/render/threaded-backend-worker.ts")],
   target: "bun",
+  plugins: [networkDefaultsPlugin(snapshotPath, networkDefaults)],
   naming: { entry: "[name].ts" },
   compile: { outfile: buildPath },
   sourcemap: "inline",
@@ -50,6 +70,6 @@ if (await Bun.file(previousMap).exists()) {
 }
 await rename(buildPath, join(workspace, "dist/quake3-ts"));
 await Bun.write(join(workspace, "dist/build.json"), `${JSON.stringify({ built: new Date().toISOString(), bun: Bun.version, executable: process.execPath,
-  snapshotPath, snapshot: snapshot.manifest, binarySha256, sourceMap: { mode: "inline", companions },
+  snapshotPath, snapshot: snapshot.manifest, binarySha256, networkDefaults, sourceMap: { mode: "inline", companions },
   gates: ["typecheck", "policy"] }, null, 2)}\n`);
 process.stdout.write(`Built dist/quake3-ts from snapshot ${snapshot.manifest.sha256}; evidence: dist/build.json\n`);

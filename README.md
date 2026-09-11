@@ -44,6 +44,14 @@ The result is `dist/quake3-ts`, with the Bun runtime included. It still needs th
 
 The build runs type and policy checks against a captured copy of its inputs, then verifies that the inputs have not changed before publishing the executable. It records source and binary hashes in `dist/build.json`. These build checks do not replace the full test run.
 
+Custom builds can override the original master and authorization endpoints:
+
+```sh
+bun run build --master-server master.example.org --auth-server auth.example.org --auth-port 27952
+```
+
+Without overrides, the source endpoint names remain unchanged. Raw TypeScript runs accept `Q3_MASTER_SERVER`, `Q3_AUTH_SERVER`, and `Q3_AUTH_PORT`. Builds record and embed their chosen values; later environment changes cannot override them. Host strings are lowercased, the master port remains 27950, and authorization ports must be 1–65535. This preserves the current transport boundary instead of reproducing native integer truncation.
+
 ## Run
 
 Create a writable home for configuration, screenshots, demos, and other runtime files. Keep it separate from the retail installation:

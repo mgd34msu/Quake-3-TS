@@ -5,6 +5,7 @@ import { CommonError } from "../core/common-error.ts";
 import type { CvarRegistry } from "../core/cvar.ts";
 import { infoSetValueForKey, infoValueForKey } from "../core/info-string.ts";
 import { nativeAtoi } from "../core/native-numeric.ts";
+import { MASTER_SERVER_PORT, NETWORK_DEFAULTS } from "../core/network-defaults.ts";
 import { sourceCommandText } from "../core/text.ts";
 import type { Ipv4Address } from "../platform/network.ts";
 import type { UnixIo } from "../platform/unix-io.ts";
@@ -406,7 +407,7 @@ export class ServerBrowser {
     this.masterNum = nativeAtoi(at(context.argv, 1));
     this.print("Requesting servers from the master...\n");
     const mplayer = this.masterNum === 1;
-    const address = await this.options.io.resolveAddress("master.quake3arena.com", 27950);
+    const address = await this.options.io.resolveAddress(NETWORK_DEFAULTS.masterServer, MASTER_SERVER_PORT);
     this.entry(); context.assertActive();
     if (address === null) throw new Error("CL_GlobalServers_f: failed master resolution leaves an undefined native address");
     if (mplayer) { this.mplayer.count = -1; this.pingUpdateSource = ServerBrowserSource.Mplayer; }
@@ -417,7 +418,7 @@ export class ServerBrowser {
     if (restrict !== undefined && Math.fround(restrict.numericValue) !== 0) command += " demo";
     if (command.length >= 1024) throw new RangeError("CL_GlobalServers_f would overflow its source command buffer");
     if (command.replace(/%%/g, "").includes("%")) throw new RangeError("CL_GlobalServers_f has undefined native variadic formatting in its command");
-    this.send("server", { ...address, port: 27950 }, encodeConnectionlessText(command.replace(/%%/g, "%")));
+    this.send("server", { ...address, port: MASTER_SERVER_PORT }, encodeConnectionlessText(command.replace(/%%/g, "%")));
   }
 
   async pingCommand(context: CommandContext): Promise<void> {

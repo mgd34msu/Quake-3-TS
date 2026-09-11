@@ -535,6 +535,10 @@ export function botGetActivateGoal(context: GameAiContext, state: BotState, enti
       }
     }
   }
+  const obstacleDebug = context.game.options.cvars.find("com_botObstacleDebug");
+  if (obstacleDebug !== undefined && obstacleDebug.integerValue !== 0) {
+    error(context, `BotGetActivateGoal: no valid activator for entity with target "${targetName}"\n`);
+  }
   return 0;
 }
 

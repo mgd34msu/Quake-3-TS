@@ -1,6 +1,7 @@
 // CL_RequestAuthorization from id Software's client/cl_main.c.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import { CvarFlag } from "../core/cvar.ts";
+import { NETWORK_DEFAULTS } from "../core/network-defaults.ts";
 import type { CvarRegistry } from "../core/cvar.ts";
 import type { Ipv4Address } from "../platform/network.ts";
 import type { UnixIo } from "../platform/unix-io.ts";
@@ -24,15 +25,15 @@ export class ClientAuthorization {
     assertCurrentOperation();
     const print = (text: string): void => { this.options.print(text); assertCurrentOperation(); };
     if (this.address === null) {
-      print("Resolving authorize.quake3arena.com\n");
-      const resolved = await this.options.io.resolveAddress("authorize.quake3arena.com", 27952);
+      print(`Resolving ${NETWORK_DEFAULTS.authorizeServer}\n`);
+      const resolved = await this.options.io.resolveAddress(NETWORK_DEFAULTS.authorizeServer, NETWORK_DEFAULTS.authorizePort);
       assertCurrentOperation();
       if (resolved === null) {
         print("Couldn't resolve address\n");
         return;
       }
       this.address = resolved;
-      print(`authorize.quake3arena.com resolved to ${resolved.host.join(".")}:${resolved.port}\n`);
+      print(`${NETWORK_DEFAULTS.authorizeServer} resolved to ${resolved.host.join(".")}:${resolved.port}\n`);
     }
 
     const { cvars, cdKey, io } = this.options;

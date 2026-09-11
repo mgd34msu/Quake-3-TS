@@ -47,6 +47,7 @@ export function registerSourceBotCvars(cvars: CvarRegistry): void {
     ["bot_grapple", "0", 0], ["bot_rocketjump", "1", 0], ["bot_challenge", "0", 0], ["bot_minplayers", "0", 0],
     ["bot_interbreedchar", "", cheat], ["bot_interbreedbots", "10", cheat],
     ["bot_interbreedcycle", "20", cheat], ["bot_interbreedwrite", "", cheat],
+    ["com_botObstacleDebug", "0", CvarFlag.Init],
   ];
   for (const [name, value, flags] of definitions) cvars.register(name, value, flags);
 }

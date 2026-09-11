@@ -97,6 +97,14 @@ Shared `Info_Print` retains source key padding, individual output calls and dang
 
 Source-defined quirks are otherwise preserved where verified. Examples include movement overbounce, snapshot coordinate truncation, reliable-command overflow ordering, routing tie order and stationary box-versus-capsule behavior.
 
+Three deliberate network restrictions have no cvar that selects unrestricted source behavior:
+
+| Boundary | Original behavior | Retained restriction |
+| --- | --- | --- |
+| Rcon diagnostic | `SVC_RemoteCommand` prints `Cmd_Argv(2)` for valid and invalid requests before output redirection. This is the first command token, not normally the password argument or the whole command. A quoted token can contain spaces. | `ServerRconRuntime.handle` prints `[command omitted]` to avoid recording credentials embedded in that token. Authentication, execution and redirected command output still run; this is not general secret filtering. See `src/server/rcon.ts` and `tests/server-rcon.test.ts`. |
+| Retail download names | `FS_idPak` recognizes extensionless `baseq3/pak0` through `pak8` and the corresponding missionpack names. A direct request containing `.pk3` does not match that source check. | `ServerDownloadRuntime` also denies those `.pk3` names before opening a file. The filter compares names, not contents, and does not identify renamed retail files. `sv_allowDownload` enables downloads generally but cannot override this denial. Filesystem containment is a separate boundary in `src/assets/download-file.ts`. See `tests/server-downloads.test.ts`. |
+| Qport admission | `SV_DirectConnect` retains the parsed signed integer, while later packet routing compares it with a 16-bit wire qport. Out-of-range admitted values cannot match ordinary subsequent packets. | `directConnect` rejects parsed values outside 0–65535 before reconnect, challenge, game or slot work. Source numeric-prefix parsing remains; values are not silently masked into range. See `src/server/client-lifecycle.ts` and `tests/server-client-lifecycle.test.ts`. |
+
 MD4 rendering preserves copied allocation bytes, source skeletal arithmetic, first-LOD selection, partial allocation/publication order and raw tess index/count behavior. Source strings may continue beyond their declared field within the actual allocation. Published CPU/GL batches contain only referenced cells, in original slot order; unused nonfinite cells are not projected and indices are not repaired. Scene entities now expose complete retained pose records, including non-model kinds; world/entity2D have distinct renderer-lifetime zero records. Equal frames do not consume backLerp. Reads outside the copied allocation, unregistered first-LOD storage and incomplete detached diagnostic records still reject explicitly. See `tests/md4-resource.test.ts`, `tests/md4-scene.test.ts`, `tests/tess-state.test.ts` and `tests/stencil-shadows.test.ts`.
 
 ### Renderer comparison profiles

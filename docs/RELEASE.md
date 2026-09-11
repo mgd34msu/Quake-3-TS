@@ -1,10 +1,20 @@
-# September 10 runtime release
+# Runtime releases
 
-The 21:47 executable passed the recorded milestone profiles, completing the dependency graph. Later filename discoveries and their pending corrections are separate post-plan work in PARITY_PUNCH_LIST.md. This executable does not contain those corrections. Prior acceptance is not a claim of unrestricted source parity or satisfactory performance.
+## Current correction build: September 11 01:28 UTC
+
+The main post-plan correction batch is complete in commit `c608464`. Its Bun 1.3.14 executable is 106,641,536 bytes, built at 01:28:00 UTC (September 10 8:28 PM Chicago); `dist/quake3-ts` and `/home/buzzkill/Projects/qfiles/q3a/quake3-ts` compare equal. Build typing, strict policy and input-consistency checks pass. The subsequent final obstacle diagnostic is not in this executable.
+
+All four compiled product/backend cases pass with `r_smp=1`: worker startup without fallback, authoritative movement/fire, managed drop recovery, fresh admission, video restart, renewed gameplay and clean exit. Eight normally terminated recordings contain 216 active snapshots. Root inspected decoded results and post-restart screenshots; close-wall views limit scene coverage. Raw product-menu switching also passes in both renderers. These are functional checks, not new FPS or pixel-equivalence measurements.
+
+The executable, build metadata, build log, unchanged runners, recordings, PNGs and decoded results are retained in `.artifacts/releases/2026-09-11-0128/`. The preceding 21:47 build remains archived. No retail assets, keys or user configuration were copied into the project. This is a local runtime build, not a GitHub release. Remaining source qualifications and the optional-source list are in [PARITY_PUNCH_LIST.md](PARITY_PUNCH_LIST.md).
+
+## Historical September 10 21:47 build
+
+The 21:47 executable passed the recorded milestone profiles, completing the dependency graph. Later filename discoveries were separate post-plan work, now included in the current build above. The historical 21:47 executable does not contain those corrections. Prior acceptance is not a claim of unrestricted source parity or satisfactory performance.
 
 ## Executable
 
-The September 10, 2026, 21:47:20 UTC Bun 1.3.14 build is 104,454,272 bytes. `dist/quake3-ts` and `/home/buzzkill/Projects/qfiles/q3a/quake3-ts` compare equal. Build typing, TypeScript policy and input-consistency checks pass. Root confirmed production source and tests match `.artifacts/snapshots/build-FaTr3P/` after the gameplay checks, before subsequent optimization experiments.
+The September 10, 2026, 21:47:20 UTC Bun 1.3.14 build is 104,454,272 bytes. Its dist and qfiles copies compared equal at that checkpoint; both destinations now contain the newer build above. Build typing, TypeScript policy and input-consistency checks passed. Root confirmed production source and tests matched `.artifacts/snapshots/build-FaTr3P/` after the gameplay checks, before subsequent optimization experiments.
 
 `dist/build.json` retains source and executable hashes. `.artifacts/releases/2026-09-10-2147/` preserves this executable, metadata, build log, existing runner, eight gameplay recordings, eight PNGs and their decoded evidence. Previous releases, including 2039, remain intact. No retail assets, installed keys or user configuration were copied into the project.
 
