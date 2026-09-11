@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import { assertBuildInputs, buildNetworkDefaults, checkedBuildSnapshot, compileSnapshot } from "./build.ts";
 import { RELEASE_TARGETS } from "./release-targets.ts";
 
-const documents = ["README.md", "LICENSE", "NOTICE", "docs/PLATFORMS.md"];
+const documents = ["README.md", "LICENSE", "NOTICE.md", "docs/PLATFORMS.md",
+  "licenses/IJG-README.txt", "licenses/LGPL-2.1.txt", "licenses/Bun-LICENSE.md"];
 
 async function release(): Promise<void> {
   if (Bun.version !== "1.3.14") throw new Error("Release builds require Bun 1.3.14");

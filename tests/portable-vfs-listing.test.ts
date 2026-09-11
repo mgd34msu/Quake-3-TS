@@ -43,7 +43,9 @@ test("native host roots preserve source filename bytes in listings and reads", a
   const root = join(await fixture(), "hôte-\u0100");
   const game = join(root, "baseq3");
   await mkdir(game, { recursive: true });
-  const names = ["\xe9.cfg", "\xc3\xa9.cfg"];
+  const names = process.platform === "darwin"
+    ? ["\xc2\xa3.cfg", "\xe4\xb8\xad.cfg"]
+    : ["\xe9.cfg", "\xc3\xa9.cfg"];
   for (const name of names) {
     const path = Buffer.concat([Buffer.from(`${game}/`), Buffer.from(name, process.platform === "win32" ? "utf8" : "latin1")]);
     await writeFile(path, name);
@@ -52,6 +54,12 @@ test("native host roots preserve source filename bytes in listings and reads", a
   using vfs = await VirtualFileSystem.openInspection({ dataPath: root, homePath: root, cdPath: null, product: "baseq3" });
   for (const name of names) expect(new TextDecoder().decode(vfs.readSync(name))).toBe(name);
   expect(vfs.listFilteredFiles("", "", "*.cfg").slice().sort()).toEqual(names.map(name => `/${name}`).sort());
+});
+
+test.skipIf(process.platform !== "darwin")("Darwin rejects invalid UTF-8 native filename bytes", async () => {
+  const root = await fixture();
+  const path = Buffer.concat([Buffer.from(`${root}/`), Buffer.from("\xe9.cfg", "latin1")]);
+  await expect(writeFile(path, "invalid UTF-8 filename")).rejects.toMatchObject({ code: "EILSEQ" });
 });
 
 test.skipIf(process.platform !== "win32")("Windows listings omit names outside the source byte domain", async () => {

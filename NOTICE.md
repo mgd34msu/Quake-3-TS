@@ -14,6 +14,6 @@ STICHTING MATHEMATISCH CENTRUM DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFT
 
 `src/core/native-random.ts` is an altered, instance-owned TypeScript translation of the GNU C Library's default TYPE_3 random-number generator. The original is Copyright Free Software Foundation, Inc., distributed under LGPL-2.1-or-later. Its license is included in [licenses/LGPL-2.1.txt](licenses/LGPL-2.1.txt). Source and native-sequence provenance are recorded in `tests/core/native-random.test.ts`.
 
-Retail Quake III Arena and Team Arena artwork, maps, music and other game data remain separate installed inputs and are not included in this project or its executable. Bun, SDL2 and the OpenGL implementation are external runtime/tooling dependencies with their own licenses.
+Retail Quake III Arena and Team Arena artwork, maps, music and other game data remain separate installed inputs and are not included in this project or its executable. Release executables embed Bun 1.3.14; its upstream [license and linked-library notices](licenses/Bun-LICENSE.md) accompany the archives. SDL2 and the OpenGL implementation remain external dependencies with their own licenses.
 
 Additional notices must accompany translations of other upstream files covered by the source release README's exceptions. The source inventory tracks those inputs; a mapping alone does not establish complete translation.

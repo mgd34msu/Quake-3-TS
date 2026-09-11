@@ -24,6 +24,17 @@ function canonicalPathBytes(path: Buffer): Buffer {
   return process.platform === "win32" ? Buffer.from(path.toString("utf8").replaceAll("\\", "/"), "utf8") : path;
 }
 
+function canonicalDownloadRoot(root: NativeRoot): Buffer {
+  const resolved = realpathSync(root.resolvedBytes(), { encoding: "buffer" });
+  if (process.platform !== "win32") return resolved;
+  // realpath can retain a DOS short-name ancestor. Compare the same native
+  // canonical spelling used for the subsequently opened download descriptor.
+  const native = nativeFileOperations();
+  const directory = native.openDirectory(resolved);
+  try { return native.descriptorPath(directory); }
+  finally { closeSync(directory); }
+}
+
 function externalError(kind: ServerDownloadErrorKind, path: string, action: string, cause: unknown): ServerDownloadError {
   const detail = cause instanceof Error ? cause.message : String(cause);
   return new ServerDownloadError(kind, path, `${action} ${JSON.stringify(path)}: ${detail}`, cause);
@@ -47,7 +58,7 @@ export function openDownloadDescriptor(root: NativeRoot, name: string): { readon
       "Server download filenames require non-NUL source bytes", undefined);
   }
   let rootBytes: Buffer, canonical: Buffer;
-  try { rootBytes = canonicalPathBytes(realpathSync(root.resolvedBytes(), { encoding: "buffer" })); }
+  try { rootBytes = canonicalDownloadRoot(root); }
   catch (cause) { throw externalError("io", root.sourceText, "Cannot resolve server download root", cause); }
   const requested = Buffer.concat([rootBytes, Buffer.from("/"), sourceNativeComponent(name.replaceAll("\\", "/"))]);
   try { canonical = canonicalPathBytes(realpathSync(requested, { encoding: "buffer" })); }

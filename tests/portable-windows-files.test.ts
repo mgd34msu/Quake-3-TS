@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWindowsFileOperations } from "../src/platform/file-windows.ts";
 import type { FileNativeOperations } from "../src/platform/file-native-types.ts";
+import { openDownloadDescriptor } from "../src/assets/download-file.ts";
+import { NativeRoot } from "../src/assets/native-root.ts";
 
 function fixture(run: (files: FileNativeOperations, directory: number, root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "quake3-windows-files-é-"));
@@ -36,16 +38,25 @@ describe.skipIf(process.platform !== "win32")("Windows handle-relative files", (
   test("shares descriptors with Bun and reports canonical paths through Unicode roots", () => {
     fixture((files, directory, root) => {
       expect(fstatSync(directory).isDirectory()).toBe(true);
-      expect(files.descriptorPath(directory).toString()).toBe(realpathSync(root).replaceAll("\\", "/"));
+      const nativeRoot = files.descriptorPath(directory);
+      const aliasDirectory = files.openDirectory(Buffer.from(realpathSync(root)));
+      try {
+        expect(files.descriptorPath(aliasDirectory)).toEqual(nativeRoot);
+        expect(fstatSync(aliasDirectory).ino).toBe(fstatSync(directory).ino);
+        expect(fstatSync(aliasDirectory).dev).toBe(fstatSync(directory).dev);
+      } finally { closeSync(aliasDirectory); }
       const duplicate = files.duplicateDirectory(directory);
-      try { expect(fstatSync(duplicate).isDirectory()).toBe(true); }
+      try {
+        expect(fstatSync(duplicate).isDirectory()).toBe(true);
+        expect(files.descriptorPath(duplicate)).toEqual(nativeRoot);
+      }
       finally { closeSync(duplicate); }
 
       const name = "é-玩家.bin";
       writeFileSync(join(root, name), Buffer.from([0, 10, 13, 26, 255]));
       const fromBun = openSync(join(root, name), "r");
       try {
-        expect(files.descriptorPath(fromBun).toString()).toBe(`${realpathSync(root).replaceAll("\\", "/")}/${name}`);
+        expect(files.descriptorPath(fromBun).toString()).toBe(`${nativeRoot.toString()}/${name}`);
         expect(files.descriptorPosition(fromBun)).toBe(0);
         const bytes = Buffer.alloc(2);
         expect(readSync(fromBun, bytes, 0, 2, null)).toBe(2);
@@ -54,6 +65,28 @@ describe.skipIf(process.platform !== "win32")("Windows handle-relative files", (
       const opened = files.openChild(directory, Buffer.from(name), constants.O_RDONLY, 0);
       try { expect(readFileSync(opened)).toEqual(Buffer.from([0, 10, 13, 26, 255])); }
       finally { closeSync(opened); }
+    });
+  });
+
+  test("downloads retain the native root identity through a configured junction", () => {
+    fixture((files, directory, root) => {
+      const target = join(root, "downloads"), outside = join(root, "outside"), alias = join(root, "alias");
+      mkdirSync(target);
+      mkdirSync(outside);
+      writeFileSync(join(target, "data.bin"), "contained");
+      writeFileSync(join(outside, "data.bin"), "outside");
+      symlinkSync(target, alias, "junction");
+      symlinkSync(outside, join(target, "escape"), "junction");
+      const targetDirectory = files.openChildDirectory(directory, Buffer.from("downloads"));
+      try {
+        const opened = openDownloadDescriptor(NativeRoot.fromHost(alias), "data.bin");
+        if (opened === undefined) throw new Error("Expected configured junction download");
+        try {
+          expect(opened.root).toEqual(files.descriptorPath(targetDirectory));
+          expect(readFileSync(opened.descriptor, "utf8")).toBe("contained");
+        } finally { closeSync(opened.descriptor); }
+        expect(() => openDownloadDescriptor(NativeRoot.fromHost(alias), "escape/data.bin")).toThrow("escapes configured root");
+      } finally { closeSync(targetDirectory); }
     });
   });
 
