@@ -1,12 +1,12 @@
 # Runtime releases
 
-## Current correction build: September 11 01:28 UTC
+## Current correction build: September 11 01:57 UTC
 
-The main post-plan correction batch is complete in commit `c608464`. Its Bun 1.3.14 executable is 106,641,536 bytes, built at 01:28:00 UTC (September 10 8:28 PM Chicago); `dist/quake3-ts` and `/home/buzzkill/Projects/qfiles/q3a/quake3-ts` compare equal. Build typing, strict policy and input-consistency checks pass. The subsequent final obstacle diagnostic is not in this executable.
+The main post-plan correction batch is complete in `c608464`; `9e86b40` adds the final obstacle diagnostic, endpoint build overrides and standalone source algorithms. The current Bun 1.3.14 executable is 106,641,536 bytes, built at 01:57:48 UTC (September 10 8:57 PM Chicago); `dist/quake3-ts` and `/home/buzzkill/Projects/qfiles/q3a/quake3-ts` compare equal. Build typing, strict policy and input-consistency checks pass. The final obstacle diagnostic is included. The default master/auth endpoints are embedded and recorded in build metadata.
 
 All four compiled product/backend cases pass with `r_smp=1`: worker startup without fallback, authoritative movement/fire, managed drop recovery, fresh admission, video restart, renewed gameplay and clean exit. Eight normally terminated recordings contain 216 active snapshots. Root inspected decoded results and post-restart screenshots; close-wall views limit scene coverage. Raw product-menu switching also passes in both renderers. These are functional checks, not new FPS or pixel-equivalence measurements.
 
-The executable, build metadata, build log, unchanged runners, recordings, PNGs and decoded results are retained in `.artifacts/releases/2026-09-11-0128/`. The preceding 21:47 build remains archived. No retail assets, keys or user configuration were copied into the project. This is a local runtime build, not a GitHub release. Remaining source qualifications and the optional-source list are in [PARITY_PUNCH_LIST.md](PARITY_PUNCH_LIST.md).
+The executable, build metadata, build log, unchanged runners, recordings, PNGs and decoded results are retained in `.artifacts/releases/2026-09-11-0157/`. The preceding 01:28 and 21:47 builds remain archived. The new ranking and IPX libraries do not provide service/transport integration and are not new playable modes. No retail assets, keys or user configuration were copied into the project. This is a local runtime build, not a GitHub release. Remaining source qualifications and the optional-source list are in [PARITY_PUNCH_LIST.md](PARITY_PUNCH_LIST.md).
 
 ## Historical September 10 21:47 build
 

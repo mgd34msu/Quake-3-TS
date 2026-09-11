@@ -16,7 +16,7 @@ The examiners covered function bodies, declarations, globals and conditional bra
 
 The private reconciliation is `/tmp/q3-examination-reconcile-YhHrge/REPORT.md`, reproducible with `bun /tmp/q3-examination-reconcile-YhHrge/reconcile.ts`. The final missing accounts were macOS's 20 files, `code/ui/ui_players.c` and `code/game/g_bot.c`.
 
-Examination does not establish functional parity. Defined omissions discovered during review remain implementation work. Current corrections and gameplay evidence are in [STATUS.md](STATUS.md). Historical compilers, map tools and the editor were examined but are not ported applications. SDL2/Bun replace obsolete native platform implementations. Unselected DEBUG, FreeType, prerelease-demo and legacy hardware branches remain explicitly qualified. No original executable, retail VM or supplied asset was copied into the project for this pass.
+Examination does not establish functional parity. Defined omissions discovered during review remain implementation work. Current corrections and gameplay evidence are in [STATUS.md](STATUS.md). Historical compilers, map tools and the editor were examined but are not ported applications. SDL2/Bun replace obsolete native platform implementations. DEBUG, FreeType, prerelease-demo and legacy hardware implementations and their remaining qualifications are recorded in [PARITY_PUNCH_LIST.md](PARITY_PUNCH_LIST.md). No original executable, retail VM or supplied asset was copied into the project for this pass.
 
 The September 10 mapping correction links Load Config, System Setup, three syscall ordinal tables and `ui/menudef.h` to their existing owners. Later entries connect the existing RoQ codebook owner and the completed AAS, sun and display-list work. The generator records 305 mapped files across all categories.
 
@@ -28,8 +28,22 @@ The final per-module reconciliation now classifies all 287 core inputs. No input
 | --- | ---: | --- |
 | implemented | 273 | Selected-runtime bodies and declarations have TypeScript owners. Existing whole-file accounts, subsequent corrections and caller evidence support this status. |
 | replaced | 5 | The three native VM compiler files use the TypeScript interpreter; `qgl.h` and `qgl_linked.h` use typed system-GL bindings. Native backends and every platform alias are not claimed translated. |
-| not-applicable | 9 | Eight explicitly excluded legacy-ranking files and attribution-only `code/ui/ui_util.c` require no translation for the selected runtime. The ranking service is not ported. |
+| not-applicable | 9 | Eight legacy-ranking files remain excluded from the selected runtime, plus attribution-only `code/ui/ui_util.c`. Some ranking bodies now have standalone ports, listed below; the service and gameplay integration are not ported. |
 
 This reconciliation used the per-file accounts already linked in `source-examination.tsv`, then resolved their stale omission notes against current owners. It found and corrected real AAS offset/overlap/header-alias rejection and the dormant particle, sun and display-list bodies. Independent reviews and root's combined 99-case run cover those corrections. The dormant alternatives remain unselected by normal game callers. CPU display-list behavior covers the empty list namespace created by the original renderer, not native lists defined by external GL code.
 
 These statuses retain the selected build, platform replacement and undefined-behavior qualifications in the accounts and `COMPATIBILITY.md`. They are not an overall code-completion percentage, a claim that historical tools were ported, or M9/M19 parity and release acceptance. Non-core categories are unchanged. The exact pre-promotion inventory and one-time reconciliation are in `/tmp/quake3-functional-join-qHlpx2/`; independent comparison confirms only the intended core status/evidence changes. The regular inventory generator preserves these dispositions.
+
+## Subsequent standalone and build-option ports
+
+Commit `9e86b40` adds the following owners without promoting an entire excluded application or service to implemented:
+
+| Original source | Current owner and exact scope |
+| --- | --- |
+| `code/server/sv_rankings.c` | `src/server/rank-codec.ts`: ASCII encode/decode and game/player ID conversion. SDK token/status ABI and service lifecycle remain unimplemented. |
+| `code/game/g_rankings.h` | `src/game/rank-keys.ts`: all 257 literal report keys. |
+| `code/game/g_rankings.c` | `src/game/rank-reports.ts`: the 14 fire/damage/death/time/pickup/reward/capture/team-name report bodies. Frame/disconnect/game-over integration remains unimplemented. Weapon timing requires explicit storage absent from the supplied client header. |
+| `code/win32/win_net.c`, `code/qcommon/net_chan.c` | `src/platform/ipx-address.ts`: IPX address parsing, socket-field conversion, comparisons and formatting. No IPX transport or peer integration. |
+| `code/Construct` | `src/core/network-defaults.ts`, `tools/build.ts`, `tools/network-build-defaults.ts`: source master/auth endpoint overrides, shared by client and server. This does not port unrelated SDK/installer commands. |
+
+Independent codec/report reviews and lead's combined 62-case check pass. The final optional-branch account covers 269 core blocks and 12 platform rows, with the four OmniTimer SDK rows still unresolved. It is archived with the current local runtime release, not substituted for unavailable library behavior.
