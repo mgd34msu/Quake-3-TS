@@ -12,7 +12,7 @@ import { CvarFlag } from "../core/cvar.ts";
 import { CommonError } from "../core/common-error.ts";
 import type { CommandContext, ResolvedCommandHandler } from "../core/commands.ts";
 import type { Axis, Vec3 } from "../core/math.ts";
-import { SdlAudioUnavailableError } from "../platform/audio.ts";
+import { SdlAudioDevice, SdlAudioUnavailableError } from "../platform/audio.ts";
 import { CommonConsole } from "./common-console.ts";
 import { CommonEvents } from "./common-events.ts";
 import { SoundFrame } from "./sound-frame.ts";
@@ -66,7 +66,7 @@ export class EngineSound {
   get mixer(): AudioMixer | null { return this.state.kind === "started" ? this.state.mixer : null; }
   get music(): BackgroundMusic { return this.background; }
 
-  /** SDL rate/buffer selection is explicit; this backend does not use Linux OSS's sndspeed probing. */
+  /** Linux sound cvars select SDL output; sndspeed 0 retains the host's default rate. */
   initialize(options: SoundOutputOptions): void {
     this.opened();
     if (this.state.kind !== "idle" || this.common.sound.mixer !== null) throw new Error("Sound runtime must shut down before initialization");
@@ -93,7 +93,15 @@ export class EngineSound {
     this.addCommand("s_stop", { kind: "sync", handler: () => { this.stopAllSounds(); } });
 
     let mixer: AudioMixer;
-    try { mixer = this.common.sound.start(options, () => this.events.milliseconds()); }
+    const bits = Math.trunc(cvars.register("sndbits", String(options.sampleBits ?? 16), CvarFlag.Archive).numericValue);
+    const speed = Math.trunc(cvars.register("sndspeed", "0", CvarFlag.Archive).numericValue);
+    const channels = Math.trunc(cvars.register("sndchannels", String(options.channels ?? 2), CvarFlag.Archive).numericValue);
+    const device = cvars.register("snddevice", options.deviceName ?? "", CvarFlag.Archive).value;
+    try {
+      mixer = this.common.sound.start({ ...options, sampleRate: speed === 0 ? options.sampleRate : speed,
+        sampleBits: bits === 8 ? 8 : 16, channels: channels === 1 ? 1 : 2, deviceName: device === "" ? null : device,
+      }, () => this.events.milliseconds());
+    }
     catch (error) {
       this.common.output.print("------------------------------------\n");
       if (error instanceof SdlAudioUnavailableError) {
@@ -315,7 +323,10 @@ export class EngineSound {
     if (this.state.kind !== "started") this.common.output.print("sound system not started\n");
     else {
       if (this.soundMuted) this.common.output.print("sound system is muted\n");
-      this.common.output.print(`SDL2 queued S16 stereo: ${this.state.mixer.outputRate} Hz, ${this.common.sound.queuedFrames} queued frames\n`);
+      const output = this.common.sound;
+      this.common.output.print(`SDL2 queued ${output.sampleBits === 16 ? "S16" : "U8"} ${output.channels === 2 ? "stereo" : "mono"}: ${this.state.mixer.outputRate} Hz, ${output.queuedFrames} queued frames\n`);
+      this.common.output.print(`SDL audio device: ${output.deviceName ?? "default"}\n`);
+      for (const name of SdlAudioDevice.outputDeviceNames()) this.common.output.print(`  snddevice "${name}"\n`);
       this.common.output.print("SDL queued output replaces the DMA buffer; no DMA address or native page allocator.\n");
       this.common.output.print(this.background.isPlaying ? `Background file: ${this.background.loopName}\n` : "No background file.\n");
     }

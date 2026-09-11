@@ -33,6 +33,13 @@ export interface SourceSceneRange {
   copyRefEntities(): readonly SourceRefEntity[];
 }
 
+export interface SourceSceneEntityState {
+  readonly generation: number;
+  readonly count: number;
+  readonly firstSceneEntity: number;
+}
+export interface SourceSceneEntityRangeState { readonly first: number; readonly count: number }
+
 class SceneEntityCell implements SourceSceneEntity {
   readonly #record: SourceRefEntityMemory;
   readonly #lighting: EntityLightingStorage;
@@ -93,18 +100,44 @@ class SceneEntityCell implements SourceSceneEntity {
 /** One backEndData entity region, retained for its renderer allocation lifetime. */
 export class SourceSceneEntities {
   readonly #cells = new Array<SceneEntityCell | undefined>(MAX_ENTITIES);
-  readonly #ranges = new WeakMap<SourceSceneRange, object>();
+  readonly #ranges = new WeakMap<SourceSceneRange, { readonly frame: object; readonly first: number }>();
   #frame: object = {};
+  #generation = 0;
   #count = 0;
   #firstSceneEntity = 0;
 
   constructor(readonly backendMemory = SourceBackendMemory.local({ maxPolys: 600, maxPolyVertices: 3000 }),
     private readonly handles?: SourceEntityHandles) {}
 
+  snapshotState(): SourceSceneEntityState {
+    this.backendMemory.assertLive();
+    return { generation: this.#generation, count: this.#count, firstSceneEntity: this.#firstSceneEntity };
+  }
+
+  restoreState(state: SourceSceneEntityState): void {
+    this.backendMemory.assertLive();
+    if (!Number.isSafeInteger(state.generation) || state.generation < 0
+      || !Number.isInteger(state.count) || state.count < 0 || state.count > ENTITYNUM_WORLD
+      || !Number.isInteger(state.firstSceneEntity) || state.firstSceneEntity < 0 || state.firstSceneEntity > state.count)
+      throw new RangeError("Source entity snapshot counters exceed the allocation");
+    if (state.generation !== this.#generation) this.#frame = {};
+    this.#generation = state.generation;
+    this.#count = state.count;
+    this.#firstSceneEntity = state.firstSceneEntity;
+  }
+
+  rangeState(range: SourceSceneRange): SourceSceneEntityRangeState {
+    this.validateRange(range);
+    const entry = this.#ranges.get(range);
+    if (entry === undefined) throw new Error("Source scene range belongs to another entity owner");
+    return { first: entry.first, count: range.length };
+  }
+
   /** R_ToggleSmpFrame: call after the previous frame's backend has consumed its work. */
   rolloverFrame(): void {
     this.backendMemory.assertLive();
     this.#frame = {};
+    this.#generation++;
     this.#count = 0;
     this.#firstSceneEntity = 0;
   }
@@ -132,16 +165,21 @@ export class SourceSceneEntities {
   /** Captures RE_RenderScene's entity pointer/count, without its later completion writes. */
   sceneRange(): SourceSceneRange {
     this.backendMemory.assertLive();
-    const first = this.#firstSceneEntity, end = this.#count;
+    return this.restoreRange({ first: this.#firstSceneEntity, count: this.#count - this.#firstSceneEntity });
+  }
+
+  restoreRange(state: SourceSceneEntityRangeState): SourceSceneRange {
+    this.backendMemory.assertLive();
+    const first = state.first, end = first + state.count;
+    if (!Number.isInteger(first) || first < 0 || !Number.isInteger(state.count) || state.count < 0 || end > this.#count)
+      throw new RangeError("Source scene entity snapshot range exceeds submitted cells");
     const range: SourceSceneRange = Object.freeze({
       length: end - first,
       entity: (localIndex: number): SourceSceneEntity => {
         this.validateRange(range);
         if (!Number.isInteger(localIndex) || localIndex < 0 || localIndex >= range.length)
           throw new RangeError("Source scene entity index is outside the captured range");
-        const cell = this.#cells[first + localIndex];
-        if (cell === undefined) throw new Error("Source entity allocation is missing");
-        return cell;
+        return range.allocatedEntity(localIndex);
       },
       allocatedEntity: (localIndex: number): SourceSceneEntity => {
         this.validateRange(range);
@@ -161,7 +199,7 @@ export class SourceSceneEntities {
         return Array.from({ length: range.length }, (_, index) => range.entity(index).copyRefEntity());
       },
     });
-    this.#ranges.set(range, this.#frame);
+    this.#ranges.set(range, { frame: this.#frame, first });
     return range;
   }
 
@@ -169,7 +207,7 @@ export class SourceSceneEntities {
     this.backendMemory.assertLive();
     const frame = this.#ranges.get(range);
     if (frame === undefined) throw new Error("Source scene range belongs to another entity owner");
-    if (frame !== this.#frame) throw new Error("Source scene range belongs to a completed frame");
+    if (frame.frame !== this.#frame) throw new Error("Source scene range belongs to a completed frame");
   }
 
   /** Call only after RE_RenderScene's frontend succeeds, including its portal children. */

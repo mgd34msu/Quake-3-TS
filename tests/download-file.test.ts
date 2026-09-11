@@ -5,6 +5,7 @@ import { appendFile, mkdtemp, mkdir, rename, rm, symlink, truncate, writeFile } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDownloadDescriptor, ServerDownloadError, ServerDownloadFile } from "../src/assets/download-file.ts";
+import { NativeRoot } from "../src/assets/native-root.ts";
 import { SourceFileHandles } from "../src/assets/file-handles.ts";
 import { CommonFileState } from "../src/assets/filesystem-state.ts";
 import { CvarRegistry } from "../src/core/cvar.ts";
@@ -77,7 +78,7 @@ describe("server raw download files", () => {
     await mkdir(root);
     await symlink(root, rootLink);
     await writeFile(Buffer.concat([Buffer.from(`${root}/`), Buffer.from([0xe9]), Buffer.from(".cfg")]), "raw byte");
-    const opened = openDownloadDescriptor(rootLink, "\u00e9.cfg");
+    const opened = openDownloadDescriptor(NativeRoot.fromHost(rootLink), "\u00e9.cfg");
     if (opened === undefined) throw new Error("Expected Unicode host root fixture");
     try {
       expect(opened.root).toEqual(Buffer.from(root));
@@ -127,7 +128,7 @@ describe("server raw download files", () => {
     await writeFile(Buffer.concat([rawRoot, Buffer.from("/file.cfg")]), "raw root");
     const rootLink = join(parent, "root-link");
     await symlink(rawRoot, rootLink);
-    const opened = openDownloadDescriptor(rootLink, "file.cfg");
+    const opened = openDownloadDescriptor(NativeRoot.fromHost(rootLink), "file.cfg");
     if (opened === undefined) throw new Error("Expected raw canonical root fixture");
     expect(opened.root).toEqual(rawRoot);
     const handles = new SourceFileHandles(), handle = handles.selectFree();
@@ -159,7 +160,7 @@ describe("server raw download files", () => {
     await symlink(outside, Buffer.concat([rawRoot, Buffer.from("/escape.cfg")]));
     const rootLink = join(parent, "root-link");
     await symlink(rawRoot, rootLink);
-    expect(downloadError(() => openDownloadDescriptor(rootLink, "escape.cfg")).kind).toBe("path");
+    expect(downloadError(() => openDownloadDescriptor(NativeRoot.fromHost(rootLink), "escape.cfg")).kind).toBe("path");
   });
 
   test("searches case-sensitive configured roots in order and deduplicates them", async () => {

@@ -195,7 +195,7 @@ describe("source filesystem handles", () => {
     symlinkSync(outside, join(directory, "link"));
     expect(view.has("link/ordinary.txt")).toBe(false);
     expect(view.openRead("link/ordinary.txt")).toBeUndefined();
-    expect(() => view.openRead("../outside/ordinary.txt")).toThrow(RangeError);
+    expect(view.openRead("../outside/ordinary.txt")).toBeUndefined();
   });
 
   test("packed handles retain independent cursors and mark references before local-header failure", async () => {
@@ -249,19 +249,19 @@ describe("source filesystem handles", () => {
     expect(handles.readCount).toBe(14);
   });
 
-  test("failed acquisition releases only its opened slot and preserves the original source error", async () => {
+  test("failed acquisition retains its reached slot and preserves the original source error", async () => {
     const { options, handles } = fixture();
     const failure = new CommonError("drop", "fixture acquisition failure");
     const view = await mount({ ...options, references: { checksumFeed: 0, random: () => { throw failure; } } });
     const surviving = opened(view, "test.game");
     expect(() => view.openRead("test.arena")).toThrow(failure);
-    expect(handles.selectFree().slot).toBe(2);
+    expect(handles.selectFree().slot).toBe(3);
     const bytes = new Uint8Array(4);
     expect(view.readInto(surviving.file, bytes)).toBe(4);
     expect(new TextDecoder().decode(bytes)).toBe("game");
   });
 
-  test("empty packed whole-file reads validate CRC while retained zero-byte reads stay lazy", async () => {
+  test("empty packed runtime reads omit CRC validation and retain zero-byte read accounting", async () => {
     const methods: readonly (0 | 8)[] = [0, 8];
     for (const method of methods) {
       const { options, directory, handles } = fixture();
@@ -280,9 +280,9 @@ describe("source filesystem handles", () => {
       view.closeFile(retained.file);
       expect(view.fileLength("empty.bin")).toBe(0);
       expect(handles.readCount).toBe(0);
-      expect(() => view.readSync("empty.bin")).toThrow("CRC");
+      expect(view.readSync("empty.bin")).toEqual(new Uint8Array());
       expect(handles.selectFree().slot).toBe(1);
-      await expect(view.read("empty.bin")).rejects.toThrow("CRC");
+      expect(await view.read("empty.bin")).toEqual(new Uint8Array());
       expect(handles.selectFree().slot).toBe(1);
       expect(handles.readCount).toBe(0);
     }
@@ -321,6 +321,8 @@ describe("source filesystem handles", () => {
     const next = await mount(options);
     expect(next.readInto(empty.file, new Uint8Array(1))).toBe(0);
     next.closeFile(empty.file);
+    expect(fixtureDescriptorCount()).toBe(1);
+    next.close();
     expect(fixtureDescriptorCount()).toBe(0);
   });
 });

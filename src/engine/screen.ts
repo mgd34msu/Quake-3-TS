@@ -8,6 +8,7 @@ import { KeyCatcher } from "../core/key-codes.ts";
 import type { SdlWindow } from "../platform/sdl.ts";
 import type { SubmissionReceipt } from "../render/commands.ts";
 import type { ConfiguredRenderer, RendererConfiguration } from "../render/configuration.ts";
+import { ThreadedRendererBackend } from "../render/threaded-backend-proxy.ts";
 import type { BaseUi } from "../ui/base/ui.ts";
 import type { EngineSystemCinematics } from "./cinematics.ts";
 import type { ClientKeys } from "./client-keys.ts";
@@ -190,13 +191,20 @@ export class EngineScreen {
     } else await this.drawScreenField(presentation, "center", loadingDraw);
     this.options.assertCurrentOperation();
     const receipt = drawing.commands.submitFrame(() => {
-      if (renderer.kind === "cpu") window.present(renderer.backend.pixels);
-      else {
+      if (renderer.kind === "cpu") {
+        if (renderer.backend instanceof ThreadedRendererBackend) renderer.backend.present();
+        else window.present(renderer.backend.pixels);
+      } else {
         const drawBuffer = this.options.cvars.get("r_drawBuffer");
         if (drawBuffer === undefined) throw new Error("Screen requires registered cvar r_drawBuffer");
+        renderer.backend.checkDiagnosticFrameErrors();
         // linux_glimp.c:GLimp_EndFrame reads the current setting after rendering.
-        if (drawBuffer.value.replace(/[a-z]/g, character => character.toUpperCase()) !== "GL_FRONT") window.swap();
+        if (drawBuffer.value.replace(/[a-z]/g, character => character.toUpperCase()) !== "GL_FRONT") {
+          if (renderer.backend instanceof ThreadedRendererBackend) renderer.backend.present();
+          else window.swap();
+        }
         renderer.backend.endFrameLogging();
+        renderer.backend.updateRenderingEnabled(this.cvar("r_enablerender"), text => this.options.print(text));
       }
     });
     if (receipt !== null) {

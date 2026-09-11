@@ -309,6 +309,7 @@ export function botMatchHelpAccompany(context: GameAiContext, state: BotState, m
     botSetTeamStatus(context, state);
     botRememberLastOrderedTask(context, state);
   }
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchDefendKeyArea(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -321,6 +322,7 @@ export function botMatchDefendKeyArea(context: GameAiContext, state: BotState, m
   state.defendAwayTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchGetItem(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -330,6 +332,7 @@ export function botMatchGetItem(context: GameAiContext, state: BotState, match: 
   state.ltgType = BotLongTermGoal.GETITEM;
   state.teamGoalTime = f(context.time + TEAM_GETITEM_TIME);
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchCamp(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -364,6 +367,7 @@ export function botMatchCamp(context: GameAiContext, state: BotState, match: Cha
   state.arriveTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchPatrol(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -374,6 +378,7 @@ export function botMatchPatrol(context: GameAiContext, state: BotState, match: C
   if (state.teamGoalTime === 0) state.teamGoalTime = f(context.time + TEAM_PATROL_TIME);
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchGetFlag(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -390,6 +395,7 @@ export function botMatchGetFlag(context: GameAiContext, state: BotState, match: 
   if (context.gameType === GameType.GT_CTF) botGetAlternateRouteGoal(context, state, botOppositeTeam(context, state));
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchAttackEnemyBase(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -405,6 +411,7 @@ export function botMatchAttackEnemyBase(context: GameAiContext, state: BotState,
   state.attackAwayTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchHarvest(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -417,6 +424,7 @@ export function botMatchHarvest(context: GameAiContext, state: BotState, match: 
   state.harvestAwayTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchRushBase(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -432,6 +440,7 @@ export function botMatchRushBase(context: GameAiContext, state: BotState, match:
   state.teamGoalTime = f(context.time + CTF_RUSHBASE_TIME);
   state.rushBaseAwayTime = 0;
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchTaskPreference(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -459,6 +468,7 @@ export function botMatchReturnFlag(context: GameAiContext, state: BotState, matc
   state.teamGoalTime = f(context.time + CTF_RETURNFLAG_TIME);
   state.rushBaseAwayTime = 0;
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchJoinSubteam(context: GameAiContext, state: BotState, match: ChatMatch): void {
@@ -699,6 +709,7 @@ export function botMatchKill(context: GameAiContext, state: BotState, match: Cha
   state.ltgType = BotLongTermGoal.KILL;
   state.teamGoalTime = f(context.time + TEAM_KILL_SOMEONE);
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botMatchCTF(context: GameAiContext, state: BotState, match: ChatMatch): void {

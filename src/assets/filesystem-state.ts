@@ -10,7 +10,10 @@ import type { CvarRegistry } from "../core/cvar.ts";
 import type { SoundOutput } from "../engine/sound-output.ts";
 import type { CommonConsole } from "../engine/common-console.ts";
 import { checkedGameDirectory, pathCaseEqual, VirtualFileSystem } from "./vfs.ts";
-import type { OpenedRead, TrackedVirtualFileSystem, VfsReferenceOptions, VfsSearchOptions } from "./vfs.ts";
+import type { NativeSearchRoots, OpenedRead, TrackedVirtualFileSystem, VfsReferenceOptions, VfsRootOptions } from "./vfs.ts";
+import { hostRootInput, NativeRoot } from "./native-root.ts";
+import { MissingFileLog } from "./missing-file-log.ts";
+import { isPrereleaseDemo } from "../core/product-profile.ts";
 import { WritableFileSystem } from "./writable-files.ts";
 import { ServerPakSet } from "./pak-references.ts";
 import type { ServerPak } from "./pak-references.ts";
@@ -43,7 +46,11 @@ export type FileOpenMode = "read" | "write" | "append" | "append-sync";
 
 /** Common owns source handles. A null configuration owner is the standalone asset-tool mount profile. */
 export class CommonFileState {
-  readonly roots: VfsSearchOptions;
+  readonly roots: NativeSearchRoots;
+  private readonly initialBase: NativeRoot;
+  private readonly initialHome: NativeRoot;
+  private readonly initialCd: NativeRoot | null;
+  private readonly missingFiles: MissingFileLog;
   readonly writable: WritableFileSystem;
   readonly server: ServerFileSystem;
   readonly fileMemory: ReadFileMemory;
@@ -56,7 +63,7 @@ export class CommonFileState {
   private reordered = false;
 
   constructor(
-    private readonly initialRoots: VfsSearchOptions,
+    private readonly initialRoots: VfsRootOptions,
     private readonly print: (text: string) => undefined,
     private readonly sound: SoundOutput,
     private readonly cvars: CvarRegistry,
@@ -64,6 +71,13 @@ export class CommonFileState {
     hunk: () => HunkArena | null = () => null,
     mainZone: (() => ZoneArena) | null = null,
   ) {
+    const initialBase = hostRootInput(initialRoots.dataPath);
+    const initialHome = hostRootInput(initialRoots.homePath);
+    const initialCd = initialRoots.cdPath === null ? null : hostRootInput(initialRoots.cdPath);
+    this.initialBase = initialBase;
+    this.initialHome = initialHome;
+    this.initialCd = initialCd;
+    this.missingFiles = new MissingFileLog(initialRoots.missingFileLogPath ?? null);
     this.roots = {
       ...initialRoots,
       get product(): Product {
@@ -74,11 +88,11 @@ export class CommonFileState {
         if (game === "" || pathCaseEqual(game, "baseq3") || pathCaseEqual(baseGame, "baseq3")) return "baseq3";
         return initialRoots.product;
       },
-      get dataPath(): string { return cvars.get("fs_basepath")?.value ?? initialRoots.dataPath; },
-      get homePath(): string { return cvars.get("fs_homepath")?.value ?? initialRoots.homePath; },
-      get cdPath(): string | null {
+      get dataPath(): NativeRoot { return NativeRoot.fromSource(cvars.get("fs_basepath")?.value ?? initialBase.sourceText); },
+      get homePath(): NativeRoot { return NativeRoot.fromSource(cvars.get("fs_homepath")?.value ?? initialHome.sourceText); },
+      get cdPath(): NativeRoot | null {
         const path = cvars.get("fs_cdpath")?.value;
-        return path === undefined ? initialRoots.cdPath : path === "" ? null : path;
+        return path === undefined ? initialCd : path === "" ? null : NativeRoot.fromSource(path);
       },
     };
     this.fileMemory = new ReadFileMemory(hunk, mainZone);
@@ -234,7 +248,7 @@ export class CommonFileState {
     if (this.mounting) throw new Error("Filesystem mount operations must be awaited");
     const current = this.mountedFiles(), restriction = this.cvars.find("fs_restrict");
     if (restriction === undefined) throw new Error("Filesystem restriction cvar is not initialized");
-    if (restriction.integerValue === 0) {
+    if (restriction.integerValue === 0 && !(this.configuration !== null && isPrereleaseDemo(this.configuration.productProfile))) {
       const productId = current.readFileRetainedSync("productid.txt");
       assertCurrentOperation();
       if (productId !== undefined) {
@@ -283,10 +297,10 @@ export class CommonFileState {
     if (this.state.kind === "unmounted") {
       this.cvars.register("fs_debug", "0");
       this.cvars.register("fs_copyfiles", "0", CvarFlag.Init);
-      this.cvars.register("fs_cdpath", this.initialRoots.cdPath ?? "", CvarFlag.Init);
-      this.cvars.register("fs_basepath", this.initialRoots.dataPath, CvarFlag.Init);
+      this.cvars.register("fs_cdpath", this.initialCd?.sourceText ?? "", CvarFlag.Init);
+      this.cvars.register("fs_basepath", this.initialBase.sourceText, CvarFlag.Init);
       this.cvars.register("fs_basegame", this.initialRoots.baseGameDirectory ?? "", CvarFlag.Init);
-      this.cvars.register("fs_homepath", this.initialRoots.homePath, CvarFlag.Init);
+      this.cvars.register("fs_homepath", this.initialHome.sourceText, CvarFlag.Init);
       this.cvars.register("fs_game", this.initialRoots.gameDirectory ?? (this.initialRoots.product === "missionpack" ? "missionpack" : ""), CvarFlag.Init | CvarFlag.SystemInfo);
     }
     this.cvars.register("fs_restrict", "", CvarFlag.Init);
@@ -302,6 +316,7 @@ export class CommonFileState {
         mountGameDirectory: game => { this.writable.setGameDirectory(game); },
         handles: this.handles, serverFiles: this.server, serverPaks: this.loaded,
         fileMemory: this.fileMemory,
+        missingFiles: this.missingFiles,
         diagnostics: {
           debugPrint: text => this.fileDebugPrint(text),
           developerPrint: text => {
@@ -342,6 +357,7 @@ export class CommonFileState {
     if (previous.kind === "mounted") release(() => previous.files.retire());
     release(() => this.writable.closeAll());
     release(() => this.handles.close());
+    release(() => this.missingFiles.close());
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, "Common filesystem disposal failed", { cause: errors[0] });
   }

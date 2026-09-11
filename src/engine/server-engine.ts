@@ -17,6 +17,7 @@ import type { CvarSnapshot } from "../core/cvar.ts";
 import { printInfo } from "../core/info-string.ts";
 import { nativeAtoi } from "../core/native-numeric.ts";
 import type { LinuxNativeRandom } from "../core/native-random.ts";
+import { isPrereleaseDemo } from "../core/product-profile.ts";
 import { GameRuntime } from "../game/runtime.ts";
 import type { LanAddresses } from "../platform/lan.ts";
 import { UnixSystemClock } from "../platform/system-clock.ts";
@@ -179,7 +180,8 @@ export class ServerEngine {
     this.registerCommands();
     registerServerCvars(cvars);
     registerSourceBotCvars(cvars);
-    this.ownedBots = options.bots.kind === "source" ? new SourceBots(common, options.random) : null;
+    this.ownedBots = options.bots.kind === "source"
+      ? new SourceBots(common, options.random, (common.cvars.get("com_botDebug")?.integerValue ?? 0) !== 0) : null;
     this.botDebugPolygons = this.ownedBots?.debugPolygons ?? new BotDebugPolygons();
     if (this.ownedBots === null) this.botDebugPolygons.initialize(this.cvar("bot_maxdebugpolys").integerValue);
     this.rcon = new ServerRconRuntime(this.networkControl, { cvars, commands: this.commands, output: this.output,
@@ -390,7 +392,8 @@ export class ServerEngine {
       this.assertCommandEntry(); this.requireSourceResources();
       this.worldSectors.sectorCounts().forEach((count, slot) => { this.output.print(`sector ${slot}: ${count} entities\n`); });
     });
-    for (const name of ["map", "devmap", "spmap", "spdevmap"]) {
+    const mapCommands = isPrereleaseDemo(this.options.common.productProfile) ? ["map"] : ["map", "devmap", "spmap", "spdevmap"];
+    for (const name of mapCommands) {
       this.commands.registerAsync(name, context => this.operation("command", () => this.mapCommand(context)));
     }
     this.commands.registerAsync("killserver", () => this.operation("command", () => this.shutdownSession({ kind: "normal", reason: "killserver" })));
@@ -668,7 +671,7 @@ export class ServerEngine {
       sendPacket: (to, bytes) => { this.sendPacket(to, bytes); }, isLanAddress: address => this.options.network.lan.isLanAddress(address) });
     const tokenize = (text: string): readonly string[] => this.commands.tokenize(text);
     const pure = new ServerPureRuntime(lifecycle, { cvars, get files() { return engine.files; }, debugPrint, tokenize });
-    const clientCommands = new ServerClientCommandRuntime(world, statics, { debugBuild: false,
+    const clientCommands = new ServerClientCommandRuntime(world, statics, { debugBuild: this.cvar("com_serverDebug").integerValue !== 0,
       get pure() { return engine.cvar("sv_pure").integerValue !== 0; },
       get clientRunning() { return engine.cvar("cl_running").integerValue !== 0; },
       get floodProtect() { return engine.cvar("sv_floodProtect").integerValue !== 0; }, print, debugPrint, tokenize,
@@ -754,6 +757,7 @@ export class ServerEngine {
     const botFactory = bots.kind === "unavailable" ? bots : this.sourceBots().forMap(level);
     const create = registered ? GameRuntime.reinitialize : GameRuntime.create;
     create({ product: this.options.common.roots.product, map: level.map, collision: level.collision, world: level.spatial,
+      sourceDebug: (this.options.common.cvars.get("com_gameDebug")?.integerValue ?? 0) !== 0,
       levelTime: level.statics.time, randomSeed: this.milliseconds(), restart, buildDate: this.options.buildDate,
       cvars: this.options.common.cvars, configstrings: level.world.configstrings,
       botFactory,

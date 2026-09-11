@@ -6,12 +6,17 @@ import { float32ToBits } from "../../core/numeric.ts";
 import type { WritableLog } from "../../assets/writable-files.ts";
 import type { loadGl } from "../../platform/gl.ts";
 import type { SourceCalendarTime } from "../../platform/system-clock.ts";
+import { GlCallErrorDiagnostics } from "../platform-diagnostics.ts";
 
 export interface GlCallLoggingOptions {
   readonly cvars: CvarRegistry;
   readonly openLog: (basePath: string) => WritableLog | null;
   readonly localCalendar: () => SourceCalendarTime;
   readonly print: (text: string) => undefined;
+  readonly errorChecking?: {
+    readonly enabled: () => boolean;
+    readonly writeDiagnostic: (text: string) => undefined;
+  };
 }
 
 type LogState = { readonly kind: "unopened" } | { readonly kind: "closed" }
@@ -27,12 +32,18 @@ function header(calendar: SourceCalendarTime): string {
 
 /** Linux keeps FILE open when logging disables; GLimp_LogComment still uses it. */
 export class GlCallLogging {
+  readonly errors: GlCallErrorDiagnostics | null;
   private state: LogState = { kind: "unopened" };
   private callsLogged = false;
 
-  constructor(private readonly options: GlCallLoggingOptions) {}
+  constructor(private readonly options: GlCallLoggingOptions) {
+    this.errors = options.errorChecking === undefined ? null : new GlCallErrorDiagnostics({
+      enabled: options.errorChecking.enabled, writeDiagnostic: options.errorChecking.writeDiagnostic, print: options.print,
+    });
+  }
 
   get enabled(): boolean { return this.callsLogged; }
+  get commentEnabled(): boolean { return this.state.kind === "open"; }
 
   /** QGL_Init restores direct entry points without clearing the retained FILE or countdown. */
   resetCalls(): void { this.callsLogged = false; }
@@ -91,6 +102,7 @@ export class GlCallLogging {
 }
 
 type NativeGlCalls = ReturnType<typeof loadGl>["symbols"];
+export type GlCallLoggingSink = Pick<GlCallLogging, "enabled" | "commentEnabled" | "resetCalls" | "call" | "comment" | "endFrame" | "errors">;
 /** Ordinary calls deliberately omit Bun's native-function identity brand. */
 export type GlCalls = {
   [Name in keyof NativeGlCalls]: NativeGlCalls[Name] extends (...args: infer Arguments) => infer Result
@@ -98,6 +110,85 @@ export type GlCalls = {
 };
 
 function hex(value: number): string { return (value >>> 0).toString(16); }
+
+/** Mac checks every dispatched call, using the unwrapped native error reader. */
+export function createCheckedGlCalls(gl: GlCalls, errors: GlCallErrorDiagnostics | null,
+  getError: () => number): GlCalls {
+  if (errors === null) return gl;
+  return {
+    glCallList: errors.wrap("glCallList", gl.glCallList, getError),
+    glNewList: errors.wrap("glNewList", gl.glNewList, getError),
+    glEndList: errors.wrap("glEndList", gl.glEndList, getError),
+    glDeleteLists: errors.wrap("glDeleteLists", gl.glDeleteLists, getError),
+    glGetString: errors.wrap("glGetString", gl.glGetString, getError),
+    glGetError: errors.wrap("glGetError", gl.glGetError, getError),
+    glHint: errors.wrap("glHint", gl.glHint, getError),
+    glIsEnabled: errors.wrap("glIsEnabled", gl.glIsEnabled, getError),
+    glGetIntegerv: errors.wrap("glGetIntegerv", gl.glGetIntegerv, getError),
+    glGetFloatv: errors.wrap("glGetFloatv", gl.glGetFloatv, getError),
+    glGetTexParameterfv: errors.wrap("glGetTexParameterfv", gl.glGetTexParameterfv, getError),
+    glGetTexLevelParameteriv: errors.wrap("glGetTexLevelParameteriv", gl.glGetTexLevelParameteriv, getError),
+    glGetTexImage: errors.wrap("glGetTexImage", gl.glGetTexImage, getError),
+    glActiveTexture: errors.wrap("glActiveTexture", gl.glActiveTexture, getError),
+    glClientActiveTexture: errors.wrap("glClientActiveTexture", gl.glClientActiveTexture, getError),
+    glDrawBuffer: errors.wrap("glDrawBuffer", gl.glDrawBuffer, getError),
+    glViewport: errors.wrap("glViewport", gl.glViewport, getError),
+    glScissor: errors.wrap("glScissor", gl.glScissor, getError),
+    glClearColor: errors.wrap("glClearColor", gl.glClearColor, getError),
+    glClearDepth: errors.wrap("glClearDepth", gl.glClearDepth, getError),
+    glClearStencil: errors.wrap("glClearStencil", gl.glClearStencil, getError),
+    glClear: errors.wrap("glClear", gl.glClear, getError),
+    glEnable: errors.wrap("glEnable", gl.glEnable, getError),
+    glDisable: errors.wrap("glDisable", gl.glDisable, getError),
+    glClipPlane: errors.wrap("glClipPlane", gl.glClipPlane, getError),
+    glDepthFunc: errors.wrap("glDepthFunc", gl.glDepthFunc, getError),
+    glDepthMask: errors.wrap("glDepthMask", gl.glDepthMask, getError),
+    glColorMask: errors.wrap("glColorMask", gl.glColorMask, getError),
+    glStencilFunc: errors.wrap("glStencilFunc", gl.glStencilFunc, getError),
+    glStencilOp: errors.wrap("glStencilOp", gl.glStencilOp, getError),
+    glStencilMask: errors.wrap("glStencilMask", gl.glStencilMask, getError),
+    glDepthRange: errors.wrap("glDepthRange", gl.glDepthRange, getError),
+    glPolygonMode: errors.wrap("glPolygonMode", gl.glPolygonMode, getError),
+    glShadeModel: errors.wrap("glShadeModel", gl.glShadeModel, getError),
+    glPolygonOffset: errors.wrap("glPolygonOffset", gl.glPolygonOffset, getError),
+    glLineWidth: errors.wrap("glLineWidth", gl.glLineWidth, getError),
+    glBlendFunc: errors.wrap("glBlendFunc", gl.glBlendFunc, getError),
+    glAlphaFunc: errors.wrap("glAlphaFunc", gl.glAlphaFunc, getError),
+    glCullFace: errors.wrap("glCullFace", gl.glCullFace, getError),
+    glFrontFace: errors.wrap("glFrontFace", gl.glFrontFace, getError),
+    glMatrixMode: errors.wrap("glMatrixMode", gl.glMatrixMode, getError),
+    glLoadIdentity: errors.wrap("glLoadIdentity", gl.glLoadIdentity, getError),
+    glOrtho: errors.wrap("glOrtho", gl.glOrtho, getError),
+    glBegin: errors.wrap("glBegin", gl.glBegin, getError),
+    glEnd: errors.wrap("glEnd", gl.glEnd, getError),
+    glColor3f: errors.wrap("glColor3f", gl.glColor3f, getError),
+    glColor4f: errors.wrap("glColor4f", gl.glColor4f, getError),
+    glColor4b: errors.wrap("glColor4b", gl.glColor4b, getError),
+    glColor4ub: errors.wrap("glColor4ub", gl.glColor4ub, getError),
+    glTexCoord2f: errors.wrap("glTexCoord2f", gl.glTexCoord2f, getError),
+    glVertex2f: errors.wrap("glVertex2f", gl.glVertex2f, getError),
+    glVertex4f: errors.wrap("glVertex4f", gl.glVertex4f, getError),
+    glEnableClientState: errors.wrap("glEnableClientState", gl.glEnableClientState, getError),
+    glDisableClientState: errors.wrap("glDisableClientState", gl.glDisableClientState, getError),
+    glVertexPointer: errors.wrap("glVertexPointer", gl.glVertexPointer, getError),
+    glColorPointer: errors.wrap("glColorPointer", gl.glColorPointer, getError),
+    glTexCoordPointer: errors.wrap("glTexCoordPointer", gl.glTexCoordPointer, getError),
+    glDrawElements: errors.wrap("glDrawElements", gl.glDrawElements, getError),
+    glArrayElement: errors.wrap("glArrayElement", gl.glArrayElement, getError),
+    glGenTextures: errors.wrap("glGenTextures", gl.glGenTextures, getError),
+    glDeleteTextures: errors.wrap("glDeleteTextures", gl.glDeleteTextures, getError),
+    glBindTexture: errors.wrap("glBindTexture", gl.glBindTexture, getError),
+    glTexParameteri: errors.wrap("glTexParameteri", gl.glTexParameteri, getError),
+    glTexParameterfv: errors.wrap("glTexParameterfv", gl.glTexParameterfv, getError),
+    glTexEnvi: errors.wrap("glTexEnvi", gl.glTexEnvi, getError),
+    glTexEnvf: errors.wrap("glTexEnvf", gl.glTexEnvf, getError),
+    glTexImage2D: errors.wrap("glTexImage2D", gl.glTexImage2D, getError),
+    glTexSubImage2D: errors.wrap("glTexSubImage2D", gl.glTexSubImage2D, getError),
+    glFinish: errors.wrap("glFinish", gl.glFinish, getError),
+    glPixelStorei: errors.wrap("glPixelStorei", gl.glPixelStorei, getError),
+    glReadPixels: errors.wrap("glReadPixels", gl.glReadPixels, getError),
+  };
+}
 
 /** A GLfloat reaches printf after binary32 conversion; %f uses ties to even. */
 function decimal(value: number): string {
@@ -116,7 +207,7 @@ function decimal(value: number): string {
 }
 
 /** Each wrapper forwards its exact typed arguments to the actual loaded symbol. */
-export function createLoggedGlCalls(gl: NativeGlCalls, log: GlCallLogging | null): GlCalls {
+export function createLoggedGlCalls(gl: NativeGlCalls, log: GlCallLoggingSink | null): GlCalls {
   if (log === null) return gl;
   return {
     glCallList(list) { if (log.enabled) log.comment(`glCallList( ${list >>> 0} )\n`); return gl.glCallList(list); },
@@ -125,6 +216,7 @@ export function createLoggedGlCalls(gl: NativeGlCalls, log: GlCallLogging | null
     glDeleteLists(list, range) { log.call("glDeleteLists\n"); return gl.glDeleteLists(list, range); },
     glGetString(name) { log.call("glGetString\n"); return gl.glGetString(name); },
     glGetError() { log.call("glGetError\n"); return gl.glGetError(); },
+    glHint(target, mode) { log.call("glHint\n"); return gl.glHint(target, mode); },
     glIsEnabled(cap) { log.call("glIsEnabled\n"); return gl.glIsEnabled(cap); },
     glGetIntegerv(name, values) { log.call("glGetIntegerv\n"); return gl.glGetIntegerv(name, values); },
     glGetFloatv(name, values) { log.call("glGetFloatv\n"); return gl.glGetFloatv(name, values); },

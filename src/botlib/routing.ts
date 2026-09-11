@@ -232,6 +232,9 @@ export function initializeAasRoutePrediction(query: PredictRouteQuery, output: A
 }
 type RouteEvaluation = RouteResult | { readonly kind: "time-only"; readonly travelTime: number };
 export interface RoutingOptions {
+  readonly milliseconds?: () => number;
+  readonly routingDebug?: AasRoutingDebug;
+  readonly alternativeRouteDebug?: AasAlternativeRouteDebug;
   readonly maximumTravelTimeBytes?: number;
   readonly memory?: BotMemory;
   readonly hideRouting?: AasHideRouting;
@@ -240,6 +243,15 @@ export interface RoutingOptions {
     readonly developer: () => boolean;
     readonly print: (severity: 2 | 3, text: string) => undefined;
   };
+}
+
+export interface AasRoutingDebug {
+  readonly milliseconds: () => number;
+  readonly print: (severity: 1, text: string) => undefined;
+}
+
+export interface AasAlternativeRouteDebug extends AasRoutingDebug {
+  readonly showAreaPolygons: (world: AasWorld, area: number, color: number, groundOnly: boolean) => void;
 }
 
 interface InitializedRouting {
@@ -301,10 +313,16 @@ export class AasRouting {
   private readonly alternativeScratch: AlternativeRoutingScratch;
   private readonly hideRouting: AasHideRouting;
   private alternativeClusterCount = 0;
+  private readonly routingDebug: AasRoutingDebug | undefined;
+  private readonly milliseconds: (() => number) | undefined;
+  private readonly alternativeRouteDebug: AasAlternativeRouteDebug | undefined;
 
   constructor(private readonly world: AasWorld, options: RoutingOptions = {}) {
     this.maximumTravelTimeBytes = options.maximumTravelTimeBytes;
     this.host = options.host;
+    this.routingDebug = options.routingDebug;
+    this.milliseconds = options.milliseconds ?? options.routingDebug?.milliseconds;
+    this.alternativeRouteDebug = options.alternativeRouteDebug;
     this.memory = options.memory ?? new BotMemory();
     this.hideRouting = options.hideRouting ?? new AasHideRouting(this.memory);
     this.storage = new RoutingStorage(world, this.memory);
@@ -318,7 +336,11 @@ export class AasRouting {
     this.initializedRouting = null;
     this.storage.initializeContents();
     this.storage.initializeUpdates();
+    const reversedStart = this.routingDebug?.milliseconds();
     this.storage.initializeReversed(this.host);
+    if (this.routingDebug !== undefined && reversedStart !== undefined) {
+      this.routingDebug.print(1, `reversed reachability ${(this.routingDebug.milliseconds() - reversedStart) | 0} msec\n`);
+    }
     this.storage.initializeClusterCacheHeads();
     this.storage.initializePortalCacheHeads();
     for (let area = 1; area < this.world.areas.length; area++) {
@@ -330,7 +352,11 @@ export class AasRouting {
         this.clusterCacheArea(portal.backCluster, area);
       }
     }
+    const travelStart = this.milliseconds?.();
     this.storage.initializeAreaTravelTimes(this.maximumTravelTimeBytes);
+    if (this.routingDebug !== undefined && travelStart !== undefined) {
+      this.routingDebug.print(1, `area travel times ${(this.routingDebug.milliseconds() - travelStart) | 0} msec\n`);
+    }
     this.storage.initializePortalMaxima();
     this.initializeReachabilityAreas(spatial);
     this.areaUpdates = 0;
@@ -550,6 +576,8 @@ export class AasRouting {
 
   writeAlternativeRouteGoals(query: AlternativeRouteQuery,
     publish: (goal: AlternativeGoal, index: number) => undefined): number {
+    const debug = this.alternativeRouteDebug;
+    const started = debug?.milliseconds();
     if (query.startArea === 0 || query.goalArea === 0) return 0;
     for (const value of [query.startArea, query.goalArea, query.maximumGoals]) {
       if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) throw new RangeError("alternative route parameter must be a signed int32");
@@ -602,7 +630,11 @@ export class AasRouting {
       const startTravelTime = scratch.startTime(bestArea), goalTravelTime = scratch.goalTime(bestArea);
       publish({ origin: { x: center.x, y: center.y, z: center.z }, area: bestArea, startTravelTime, goalTravelTime,
         extraTravelTime: (startTravelTime + goalTravelTime - goalTime) & 0xffff }, goalCount++);
+      debug?.showAreaPolygons(this.world, bestArea, 1, true);
       if (goalCount >= query.maximumGoals) break;
+    }
+    if (debug !== undefined && started !== undefined) {
+      debug.print(1, `alternative route goals in ${(debug.milliseconds() - started) | 0} msec\n`);
     }
     return goalCount;
   }

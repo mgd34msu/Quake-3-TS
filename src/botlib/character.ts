@@ -99,6 +99,7 @@ export class CharacterError extends Error {
 }
 
 export interface BotCharacterLibraryOptions {
+  readonly debug?: { readonly milliseconds: () => number; readonly developer: () => boolean };
   readonly memory?: BotMemory;
   readonly log?: Pick<BotLog, "write" | "filePointer">;
   readonly reloadCharacters?: () => boolean;
@@ -282,6 +283,7 @@ export class BotCharacterLibrary {
   private readonly reloadCharacters: () => boolean;
   private readonly reportDiagnostic: BotCharacterLibraryOptions["report"];
   private readonly log: BotCharacterLibraryOptions["log"];
+  private readonly debug: BotCharacterLibraryOptions["debug"];
   private generation = 0;
   private readonly memory: BotMemory;
   private readonly strings: CharacterStrings = { allocations: new Map<number, BotMemoryAllocation>(), nextPointer: 1 };
@@ -293,6 +295,7 @@ export class BotCharacterLibrary {
     this.reloadCharacters = options.reloadCharacters ?? (() => false);
     this.reportDiagnostic = options.report;
     this.log = options.log;
+    this.debug = options.debug;
     this.memory = options.memory ?? new BotMemory();
   }
 
@@ -480,6 +483,7 @@ export class BotCharacterLibrary {
   }
 
   private loadCached(characterFile: string | (() => string), skill: number, reload: boolean, generation: number): number {
+    const startTime = this.debug?.milliseconds();
     if (!this.isCurrent(generation)) return 0;
     const handle = this.freeHandle();
     if (handle === 0) return 0;
@@ -496,7 +500,16 @@ export class BotCharacterLibrary {
     const exact = this.loadFromFile(characterFile, integerSkill, generation);
     if (!this.isCurrent(generation)) return 0;
     if (exact.kind === "loaded") {
-      return this.store(exact.profile, handle, "loaded", characterFile, `loaded skill ${integerSkill}`);
+      const result = this.store(exact.profile, handle, "loaded", characterFile, `loaded skill ${integerSkill}`);
+      if (!this.isCurrent(generation)) return 0;
+      if (this.debug !== undefined && startTime !== undefined && this.debug.developer()) {
+        if (!this.isCurrent(generation)) return 0;
+        const elapsed = (this.debug.milliseconds() - startTime) | 0;
+        if (!this.isCurrent(generation)) return 0;
+        const filename = this.validateFilename(characterFile);
+        this.emit("info", "loaded", filename, `skill ${integerSkill} loaded in ${elapsed} msec from ${filename}`);
+      }
+      return result;
     }
     const missingFilename = this.validateFilename(characterFile);
     this.emit("warning", "missing-skill", missingFilename, `couldn't find skill ${integerSkill} in ${missingFilename}`);
@@ -579,6 +592,7 @@ export class BotCharacterLibrary {
       resolve: request => invokeCallback(() => this.reader.resolve(request)),
     }, {
       globals: this.reader.globals,
+      ...(this.reader.debugEval === undefined ? {} : { debugEval: (text: string) => invokeCallback(() => this.reader.debugEval?.(text)) }),
       report: item => {
         if (this.isCurrent(generation)) {
           report(diagnostic(item.severity, "parse-error", filename, item.message, item.location));

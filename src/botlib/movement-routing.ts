@@ -94,9 +94,14 @@ export interface BotMovementRoutingHost {
   originOfMoverWithModelNum(model: number): Vec3 | null;
   entityModelNum(entity: number): number;
 }
+export interface BotMovementRoutingDebug {
+  readonly debug: boolean;
+  developer(): boolean;
+}
 
 export class BotMovementRouting {
-  constructor(readonly states: BotMoveStateStore, readonly spatial: AasSpatial, readonly routing: AasRouting, readonly host: BotMovementRoutingHost) {}
+  constructor(readonly states: BotMoveStateStore, readonly spatial: AasSpatial, readonly routing: AasRouting, readonly host: BotMovementRoutingHost,
+    private readonly diagnostics?: BotMovementRoutingDebug) {}
   /** AAS_ReachabilityFromNum copies slot zero and clears out-of-range results. */
   reachabilityFromNum(number: number): AasReachability {
     const stored = this.spatial.world.reachability[number], reach = stored === undefined ? ZERO_REACHABILITY : stored;
@@ -130,7 +135,10 @@ export class BotMovementRouting {
     if ((settings.contents | at(world.areaSettings, query.goal.area).contents) & 256) { travelFlags |= TravelFlags.DONOTENTER; moveFlags |= TravelFlags.DONOTENTER; }
     let bestTime = 0, bestReachability = 0;
     for (let number = this.nextAreaReachability(query.area, 0); number !== 0; number = this.nextAreaReachability(query.area, number)) {
-      if (query.avoid.avoidReach[0] === number && query.avoid.avoidReachTimes[0] >= f(this.states.host.time()) && query.avoid.avoidReachTries[0] > 4) continue;
+      if (query.avoid.avoidReach[0] === number && query.avoid.avoidReachTimes[0] >= f(this.states.host.time()) && query.avoid.avoidReachTries[0] > 4) {
+        if (this.diagnostics?.debug && this.diagnostics.developer()) this.states.host.print(1, `avoiding reachability ${query.avoid.avoidReach[0]}\n`);
+        continue;
+      }
       const reach = this.reachabilityFromNum(number);
       if (query.lastGoalArea === query.goal.area && reach.area === query.lastArea) continue;
       if (!this.validTravel(query.origin, reach, moveFlags)) continue;

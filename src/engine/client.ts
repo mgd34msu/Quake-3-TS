@@ -1,6 +1,7 @@
 // Client ownership from id Software's code/client/cl_main.c, cl_cgame.c and cl_ui.c.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import { AsyncLocalStorage } from "node:async_hooks";
+import { NativeRoot } from "../assets/native-root.ts";
 import { runCalls } from "../core/call-steps.ts";
 import type { SoundAssetReader } from "../cgame/sound-bank.ts";
 import type { SourceFileReader } from "../assets/reader.ts";
@@ -10,12 +11,16 @@ import { SourceClipModels } from "../collision/clip-models.ts";
 import type { CommandContext, CommandHandler, CommandLookup, ResolvedCommandHandler } from "../core/commands.ts";
 import { CommonError } from "../core/common-error.ts";
 import type { CvarSnapshot } from "../core/cvar.ts";
+import { CvarFlag } from "../core/cvar.ts";
+import type { FieldClipboard } from "../core/edit-field.ts";
 import { infoValueForKey } from "../core/info-string.ts";
 import { KeyCatcher } from "../core/key-codes.ts";
 import { nativeAtoi } from "../core/native-numeric.ts";
+import { qStrncpyz } from "../core/source-strings.ts";
 import { SdlGameInput } from "../platform/sdl-game-input.ts";
 import { SourceInputState } from "../platform/source-input.ts";
-import { SdlWindow } from "../platform/sdl.ts";
+import { SourceMidiInput } from "../platform/midi.ts";
+import { readSdlClipboard, SdlWindow } from "../platform/sdl.ts";
 import { openUnixGlDriver, initializeUnixGlRenderer } from "../platform/renderer-driver.ts";
 import type { SystemClock } from "../platform/system-clock.ts";
 import { UnixSystemClock } from "../platform/system-clock.ts";
@@ -34,6 +39,11 @@ import { SoftwareRenderer } from "../render/cpu/rasterizer.ts";
 import { CpuTriangleExecution } from "../render/cpu/triangle-execution.ts";
 import { GlRenderer } from "../render/gl/renderer.ts";
 import { GlCallLogging } from "../render/gl/logging.ts";
+import { ThreadedBackend } from "../render/threaded-backend.ts";
+import { ThreadedCommandBridge } from "../render/threaded-command-runtime.ts";
+import { ThreadedGlRenderer, ThreadedRendererBackend, ThreadedSoftwareRenderer } from "../render/threaded-backend-proxy.ts";
+import { wireInteger, wireRecord, wireString } from "../render/threaded-backend-protocol.ts";
+import type { ShaderCinematicSource } from "../render/cinematic-command.ts";
 import { RendererImageCatalog } from "../render/image-resource.ts";
 import { RegisteredRendererCvars, SourceRendererSettings, rendererVideoMode, printRendererVideoModes } from "../render/settings.ts";
 import { SourceTessState } from "../render/tess-state.ts";
@@ -117,6 +127,7 @@ export interface EngineClientServices {
   readonly io: UnixIo;
   readonly server: ServerEngine;
   assertCurrentOperation(): void;
+  runRendererCallback<T>(callback: () => T): T;
   pumpForDownloadsComplete(): Promise<void>;
 }
 interface Graphics {
@@ -145,6 +156,10 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
   private early: CommonEarlyServices | null = null;
   private services: EngineClientServices | null = null;
   private keyOwner: ClientKeys | null = null;
+  private readonly clipboard = { kind: "available", read: () => {
+    this.entry();
+    return readSdlClipboard();
+  } } satisfies FieldClipboard;
   private consoleOwner: EngineConsole | null = null;
   private inputOwner: ClientInput | null = null;
   private screenOwner: EngineScreen | null = null;
@@ -166,12 +181,14 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
   private rendererInterfaceInitialized = false;
   private sdlInput: SdlGameInput | null = null;
   private sourceInput: SourceInputState | null = null;
+  private midiInput: SourceMidiInput | null = null;
   private glLogging: GlCallLogging | null = null;
   private cpuExecution: CpuTriangleExecution | null = null;
   private backend: ConfiguredRenderer | null = null;
   private builtins: BuiltinImages | null = null;
   private graphics: Graphics | null = null;
   private registeredRendererCommands: RenderCommandBuffer | null = null;
+  private rendererCommandBridge: ThreadedCommandBridge | null = null;
   private rendererCommandCleanupPending = false;
   private readonly renderTimings = { frontEndMsec: 0, backEndMsec: 0 };
   private rendererConfiguration: RendererConfigurationSnapshot | null = null;
@@ -247,7 +264,7 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
         addReliableCommand: text => { this.addReliableCommand(text); }, toggleConsole: () => this.console.toggle(),
         updateScreen: async () => { await this.screen.update(); this.entry(); },
         consoleScroll: action => this.console.scroll(action), readConsoleWidth: () => this.console.fieldWidth,
-        clipboard: { kind: "native-unix-unavailable" },
+        clipboard: this.clipboard,
       } });
     this.consoleOwner = new EngineConsole({ state: this.clientStatic, keys: this.keys, cvars: services.cvars,
       commands: services.commands, output: services.output, host: {
@@ -267,11 +284,19 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     const early = this.required(this.early, "early common services");
     this.sourceInput = new SourceInputState({ cvars: early.cvars, print: text => this.print(text) });
     this.sourceInput.initialize();
+    this.midiInput = new SourceMidiInput({ cvars: early.cvars, print: text => this.print(text) });
+    this.midiInput.initialize();
+    early.commands.register("midiinfo", () => { this.entry(); this.required(this.midiInput, "MIDI input").info(); });
   }
 
   restartInput(): void {
     this.entry();
     this.required(this.sourceInput, "system input").restart();
+    this.required(this.midiInput, "MIDI input").restart();
+  }
+
+  pollMidiInput(unix: UnixIo): void {
+    this.midiInput?.frame((key, down, time) => { unix.queueEvent({ kind: "key", key, down, time }); });
   }
 
   bind(services: EngineClientServices): void {
@@ -432,7 +457,7 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
         ui.loadSymbols({ developer: this.cvar("developer").integerValue, files: this.common.files.current, print: text => this.print(text) });
         module.completeLoading();
       } else if (module.product === "missionpack") {
-        ui = new TeamArenaUi({ common: this.common, keys: this.keys,
+        ui = new TeamArenaUi({ common: this.common, keys: this.keys, productProfile: this.common.productProfile,
           scriptSources: () => this.required(this.services, "services").server.scriptSources(),
           browser: this.required(this.browserOwner, "server browser"), events: this.required(this.services, "services").events,
           systemClock: this.options.systemClock, calendar: this.calendar, configuration: graphics.presentation.configuration,
@@ -445,8 +470,9 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
           }), assertCurrentOperation: () => this.entry() }, module.registration);
       } else {
         const state = new BaseUiState({ cvars: new BaseUiCvars(this.common.cvars, () => this.entry()), keys: this.keys,
-          clipboard: { kind: "native-unix-unavailable" }, resources: graphics.resources, commands: graphics.commands,
-          consoleCommands: this.common.commands, sounds: this.sound.bank, audio: this.sound, hardware: "generic",
+          clipboard: this.clipboard, resources: graphics.resources, commands: graphics.commands,
+          consoleCommands: this.common.commands, sounds: this.sound.bank, audio: this.sound,
+          hardware: this.rendererInfo.hardwareType === "ragepro" ? "ragepro" : "generic",
           readClientPhase: () => this.clientStatic.phase, print: text => this.print(text), assertCurrentOperation: () => this.entry() });
         ui = new BaseUi({ state, gameInfo: new BaseUiGameInfo(state, this.common.files), files: this.common.files,
           cdKey: this.common.cdKey, commands: this.common.commands, hunk: this.required(this.common.hunk.arena, "common hunk"),
@@ -464,8 +490,9 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     const { words } = call, memory = new QvmMemory(call.memory), trap = words.getInt32(0, true);
     if (trap === 28) return this.screen.update().then(() => 0);
     if (trap === 42) {
-      // This Unix platform's Sys_GetClipboardData returns NULL; buflen is unused.
-      memory.view(words.getInt32(4, true), 1).setUint8(0, 0);
+      const bytes = this.clipboard.read();
+      if (bytes === null) memory.view(words.getInt32(4, true), 1).setUint8(0, 0);
+      else qStrncpyz(memory.pointer(words.getInt32(4, true)), bytes, words.getInt32(8, true));
       return 0;
     }
     if (trap === 52) return this.common.hunk.accounting.memoryRemaining();
@@ -565,6 +592,9 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     let configuration: RendererConfiguration | null = null;
     let resources: RendererResources | null = null;
     let commands: RenderCommandBuffer | null = null;
+    let thread: ThreadedBackend | null = null;
+    let threadedBackend: ThreadedRendererBackend | null = null;
+    let bridge: ThreadedCommandBridge | null = null;
     // R_Init clears these tables before R_Register; each real registry replaces its empty table below.
     let listShaders: RendererResources["listShaders"] = (_sorted, print) => {
       print("-----------------------\n"); print("0 total shaders\n"); print("------------------\n");
@@ -593,6 +623,11 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
       get worldBaseName() { return resources?.worldBaseName ?? null; },
     };
     const registered = new RegisteredRendererCvars(this.common.cvars, "linux", this.videoSettingsRegistered ? null : this.options, text => this.print(text));
+    for (const [name, value] of [["vid_screen", "-1"], ["r_minDisplayRefresh", "0"], ["r_maxDisplayRefresh", "0"],
+      ["vid_xpos", "3"], ["vid_ypos", "22"]] satisfies readonly (readonly [string, string])[])
+      this.common.cvars.register(name, value, CvarFlag.Archive);
+    this.common.cvars.register("r_checkGLErrors", "0");
+    this.common.cvars.register("r_enablerender", "1");
     this.videoSettingsRegistered = true;
     const register = (name: string, handler: CommandHandler): void => {
       if (this.common.commands.registeredNames().includes(name)) {
@@ -602,6 +637,10 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
       this.common.commands.register(name, handler);
     };
     this.rendererCommandCleanupPending = true;
+    register("toggle_renderer", () => {
+      rendererEntry();
+      this.common.cvars.set("r_enablerender", this.cvar("r_enablerender").integerValue === 0 ? "1" : "0", true);
+    });
     register("imagelist", () => { rendererEntry(); images.listImages(printRenderer); });
     register("shaderlist", context => {
       rendererEntry(); listShaders(context.argv.length > 1, printRenderer);
@@ -652,7 +691,11 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
         // GLimp's R_GetModeInfo publishes these fields before opening the display.
         this.rendererInfo = { ...this.rendererInfo, vidWidth: video.width, vidHeight: video.height, windowAspect: video.windowAspect };
         const dimensions = { title: "Quake III Arena", width: video.width, height: video.height,
-          hidden: this.options.hidden, fullscreen, displayRefresh: this.cvar("r_displayRefresh").integerValue };
+          hidden: this.options.hidden, fullscreen, displayRefresh: this.cvar("r_displayRefresh").integerValue,
+          displayIndex: this.cvar("vid_screen").integerValue,
+          minDisplayRefresh: this.cvar("r_minDisplayRefresh").integerValue,
+          maxDisplayRefresh: this.cvar("r_maxDisplayRefresh").integerValue,
+          position: { x: this.cvar("vid_xpos").integerValue, y: this.cvar("vid_ypos").integerValue } };
         const window = this.options.renderer === "cpu" ? SdlWindow.open({ ...dimensions, backend: "cpu" })
           : SdlWindow.open({ ...dimensions, backend: "gl", ...(driver === undefined ? {} : { driver }), allowSoftwareGl: this.cvar("r_allowSoftwareGL").integerValue !== 0,
             stereo: this.cvar("r_stereo").integerValue !== 0, stencilBits,
@@ -680,28 +723,110 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     const window = this.window;
     if (this.options.renderer === "gl" && this.glLogging === null) {
       this.glLogging = new GlCallLogging({ cvars: this.common.cvars,
-        openLog: basePath => this.common.files.writable.openGlLog(basePath),
+        openLog: basePath => this.common.files.writable.openGlLog(NativeRoot.fromSource(basePath)),
+        errorChecking: { enabled: () => this.cvar("r_checkGLErrors").integerValue !== 0,
+          writeDiagnostic: text => this.print(text) },
         localCalendar: () => this.calendar.localCalendar(), print: text => this.print(text) });
     }
-    renderer = this.options.renderer === "cpu"
+    const cinematics = new Map<number, ShaderCinematicSource>();
+    const cinematicIds = new Map<ShaderCinematicSource, number>();
+    const cinematicId = (source: ShaderCinematicSource): number => {
+      const existing = cinematicIds.get(source);
+      if (existing !== undefined) return existing;
+      const id = cinematicIds.size + 1;
+      cinematicIds.set(source, id); cinematics.set(id, source); return id;
+    };
+    if (this.cvar("r_smp").integerValue !== 0) {
+      this.print("Trying SMP acceleration...\n");
+      try {
+        const initialization = this.options.renderer === "cpu"
+          ? { kind: "cpu", ...window.drawableSize, textureFilter: this.textureFilter, subpixelBits: 8,
+            stencilBits: this.windowStencilBits, alphaBits: 0 }
+          : { kind: "gl", context: window.detachRenderContext(), textureFilter: this.textureFilter };
+        const rendererServices = this.required(this.services, "services");
+        thread = await ThreadedBackend.open(initialization, {
+          request: payload => rendererServices.runRendererCallback(() => {
+            if (typeof payload !== "object" || payload === null || !("kind" in payload) || typeof payload.kind !== "string")
+              throw new TypeError("Invalid engine renderer callback");
+            if (payload.kind === "backend-gl-log") {
+              const message = wireRecord(payload), log = this.required(this.glLogging, "GL logging");
+              switch (message["operation"]) {
+                case "reset": log.resetCalls(); return { enabled: log.enabled, comments: log.commentEnabled };
+                case "end-frame": log.endFrame(); return { enabled: log.enabled, comments: log.commentEnabled };
+                case "state": return { enabled: log.enabled, comments: log.commentEnabled };
+                case "call": log.call(wireString(message["text"])); return undefined;
+                case "comment": log.comment(wireString(message["text"])); return undefined;
+                case "error-enabled": return this.cvar("r_checkGLErrors").integerValue !== 0;
+                case "error": {
+                  const errors = this.required(log.errors, "GL error diagnostics");
+                  errors.report(wireString(message["name"]), wireInteger(message["error"])); return undefined;
+                }
+                case "diagnostic": case "print": return this.print(wireString(message["text"]));
+                default: throw new TypeError("Invalid GL logging callback");
+              }
+            }
+            if (payload.kind.startsWith("source-")) return this.required(bridge, "renderer command bridge").request(payload);
+            return this.required(threadedBackend, "threaded backend").handleHostRequest(payload, {
+              cinematic: id => {
+                const source = cinematics.get(id);
+                if (source === undefined) throw new Error("Unknown renderer cinematic");
+                return source;
+              },
+              print: text => this.print(text), textureMode: () => { throw new Error("Renderer texture mode callback has no active initializer"); },
+              presentPixels: pixels => { window.present(pixels); },
+            });
+          }),
+          completed: payload => rendererServices.runRendererCallback(() => this.required(bridge, "renderer command bridge").completed(payload)),
+        });
+        if (this.options.renderer === "cpu") {
+          const backend = new ThreadedSoftwareRenderer(thread, images, thread.description, cinematicId);
+          threadedBackend = backend; renderer = { kind: "cpu", backend };
+        } else {
+          const backend = new ThreadedGlRenderer(thread, images, thread.description, cinematicId, window);
+          threadedBackend = backend; renderer = { kind: "gl", backend };
+        }
+      } catch {
+        thread?.close(); thread = null; threadedBackend = null; renderer = null;
+        if (this.options.renderer === "gl") window.restoreRenderContext();
+      }
+      this.entry();
+      if (thread !== null && renderer?.kind === "gl") this.graphicsCleanup.push(() => window.restoreRenderContext());
+      this.print(thread === null ? "...failed.\n" : "...succeeded.\n");
+    }
+    renderer ??= this.options.renderer === "cpu"
       ? { kind: "cpu", backend: new SoftwareRenderer(window.drawableSize.width, window.drawableSize.height, images, 8, this.windowStencilBits, 0,
         this.cpuExecution ??= new CpuTriangleExecution()) }
       : { kind: "gl", backend: new GlRenderer(window, images, this.glLogging) };
     this.backend = renderer;
     const target = new RenderTarget(images, [renderer.backend]);
-    this.graphicsCleanup.push(() => target.close());
+    this.graphicsCleanup.push(() => { try { target.close(); } finally { bridge?.close(); } });
     if (initializingGl && renderer.kind === "gl") initializeUnixGlRenderer(this.common.cvars, renderer.backend.driver.renderer.replace(/\n$/, ""));
     const settings = new SourceRendererSettings(registered, renderer.backend.capabilities);
     configuration = RendererConfiguration.beginInitialization({ window, renderer, settings, windowAspect: this.windowAspect });
+    if (initializingGl && renderer.kind === "gl" && settings.extensionSettings().allow)
+      renderer.backend.initializeAppleTransformHint(() => this.common.cvars.register("r_appleTransformHint", "1", CvarFlag.Archive).integerValue !== 0,
+        text => this.print(text));
     const currentConfiguration = configuration;
     this.graphicsCleanup.push(() => currentConfiguration.close());
     this.rendererInfo = configuration.copy();
+    if (thread !== null && threadedBackend !== null) bridge = new ThreadedCommandBridge({ thread, backend: threadedBackend,
+      settings, tess, clock: { milliseconds: () => this.scaledMilliseconds() }, performanceClock: this.options.systemClock,
+      temporaryMemory: this.common.hunk.accounting.arena,
+      identityLight: () => currentConfiguration.imageUploadProfile().colorMappings.identityLight,
+      backendMaterials: () => this.required(resources, "renderer resources").backendMaterials,
+      print: printRenderer, debugBuild: this.cvar("com_rendererDebug").integerValue !== 0,
+      showSmp: () => this.cvar("r_showSmp").integerValue !== 0 });
+    this.rendererCommandBridge = bridge;
     commands = new RenderCommandBuffer(target, { clock: { milliseconds: () => this.scaledMilliseconds() },
       performanceClock: this.options.systemClock, temporaryMemory: this.common.hunk.accounting.arena,
-      commandStorage, identityLight: 0, tess, runtime: settings.runtime, print: printRenderer });
+      commandStorage, identityLight: 0, tess, runtime: settings.runtime, print: printRenderer,
+      ...(bridge === null ? {} : { thread: bridge }) });
     const currentCommands = commands;
+    if (bridge !== null) {
+      const currentBridge = bridge;
+      this.graphicsCleanup.push(() => currentBridge.close());
+    }
     this.graphicsCleanup.push(() => currentCommands.close("discard"));
-    settings.initializeNonThreadedCommandBuffers(printRenderer);
     configuration.printGfxInfo(this.common.cvars, printRenderer);
     configuration.initializeDefaultState();
     configuration.initializeColorMappings(commands);
@@ -715,7 +840,8 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
         clock: { sample: () => Math.fround(Math.fround(this.scaledMilliseconds()) * Math.fround(this.cvar("timescale").numericValue)) },
         scratchImages: { scratchImage: index => this.required(this.builtins, "cinematic scratch images").scratchImage(index) },
         console: { kind: "available", close: () => this.console.close() }, settings: {
-          inGameVideo: () => this.cvar("r_inGameVideo").integerValue, hardware: "generic",
+          inGameVideo: () => this.cvar("r_inGameVideo").integerValue,
+          get hardware(): "ragepro" | "generic" { return client.rendererInfo.hardwareType === "ragepro" ? "ragepro" : "generic"; },
           get maxTextureSize(): number { const backend = client.required(client.backend, "cinematic renderer"); return backend.kind === "gl" ? backend.backend.maxTextureSize : 4096; },
         } });
       this.systemCinematics = this.cinematicOwner.attachSystem({
@@ -728,8 +854,20 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     }
     resources = await RendererResources.create(this.assets(), { kind: "source-hunk", accounting: this.common.hunk.accounting }, settings,
       { images, builtins: this.builtins, shaderCinematics: this.cinematicOwner.shaderCinematics, target, imageProfile,
+        debugBuild: this.cvar("com_rendererDebug").integerValue !== 0,
+        ...(bridge === null ? {} : { worldTransport: bridge.worldTransport }),
         tess, clock: this.options.systemClock,
         patchMemory: { kind: "source-zone", zone: this.common.mainZone },
+        fontGeneration: {
+          saveFontData: () => this.cvar("r_saveFontData").integerValue !== 0,
+          writeFile: (name, bytes) => {
+            this.entry();
+            const opened = this.common.files.openByMode(name, "write");
+            if (opened === undefined) return;
+            this.common.files.writable.writeBytes(opened.file, bytes);
+            this.common.files.closeFile(opened.file.slot);
+          },
+        },
         print: text => { this.entry(); return this.print(text); },
         publishListings: listings => {
           rendererEntry();
@@ -742,6 +880,8 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
           if (mode === 1) this.common.collisionDebug.draw(drawPoly);
           else this.required(this.services, "services").server.drawBotDebugPolygons(drawPoly, mode);
         } });
+    const currentResources = resources;
+    this.graphicsCleanup.push(() => currentResources.fonts.close());
     this.entry();
     if (renderer.kind === "gl") {
       const error = renderer.backend.getError();
@@ -764,6 +904,7 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     const drawing = createEngineScreenDrawing({ commands, resources, pictures: { charset, white, console }, state: this.clientStatic, keys: this.keys });
     this.graphics = { target, commands, resources, presentation: { drawing, renderer, window, configuration,
       cinematics: this.required(this.systemCinematics, "system cinematics") } };
+    if (renderer.kind === "gl") renderer.backend.updateRenderingEnabled(this.cvar("r_enablerender").integerValue, text => this.print(text));
   }
 
   private resetConnection(): void {
@@ -1019,8 +1160,10 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
       level.loadSymbols({ developer: this.cvar("developer").integerValue, files: this.common.files.current, print: text => this.print(text) });
       module.completeLoading();
     } else level = new ClientLevel({ session, assets: this.assets(), resources: graphics.resources,
+      sourceDebug: this.cvar("com_gameDebug").integerValue !== 0,
       commands: graphics.commands, target: graphics.target, sound: this.sound,
-      memory: this.required(this.common.hunk.arena, "common hunk"), hardware: "generic",
+      memory: this.required(this.common.hunk.arena, "common hunk"),
+      hardware: this.rendererInfo.hardwareType === "ragepro" ? "ragepro" : "generic",
       loadCollisionMap: name => {
         this.entry(); const world = this.common.collision.load(name, true).world; this.entry(); return world;
       },
@@ -1115,14 +1258,17 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     this.ui?.retire(); this.ui = null;
   }
   private disposeGraphics(): void {
+    const failures: unknown[] = [];
+    if (this.backend?.backend instanceof ThreadedRendererBackend && this.rendererCommandBridge?.retired !== true) {
+      try { this.backend.backend.thread.synchronize(); } catch (error) { failures.push(error); }
+    }
     this.graphics = null;
     this.registeredRendererCommands = null;
-    const failures: unknown[] = [];
     while (this.graphicsCleanup.length !== 0) {
       const close = this.graphicsCleanup.pop();
       if (close !== undefined) try { close(); } catch (error) { failures.push(error); }
     }
-    this.backend = null; this.builtins = null;
+    this.backend = null; this.builtins = null; this.rendererCommandBridge = null;
     if (failures.length !== 0) throw new AggregateError(failures, "Client renderer disposal failed");
   }
   private unregisterRendererCommands(): void {
@@ -1133,22 +1279,26 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     this.common.commands.unregister("gfxinfo");
     this.common.commands.unregister("modelist");
     this.common.commands.unregister("shaderstate");
+    this.common.commands.unregister("toggle_renderer");
     this.rendererCommandCleanupPending = false;
   }
   private shutdownRenderer(destroyWindow: boolean): void {
     if (!this.rendererInterfaceInitialized) return;
     this.print(`RE_Shutdown( ${destroyWindow ? 1 : 0} )\n`);
     this.unregisterRendererCommands();
-    this.retainTextureFilter();
-    // RE_Shutdown -> R_SyncRenderThread executes pending screenshots before teardown.
-    this.registeredRendererCommands?.submit();
+    const retired = this.rendererCommandBridge?.retireAfterFailure() === true || this.rendererCommandBridge?.retired === true;
+    if (!retired) {
+      this.retainTextureFilter();
+      // RE_Shutdown -> R_SyncRenderThread executes pending screenshots before teardown.
+      this.registeredRendererCommands?.target.syncRenderThread();
+    }
     this.graphics = null; this.registeredRendererCommands = null;
     while (this.graphicsCleanup.length !== 0) {
       const close = this.graphicsCleanup.pop();
       if (close !== undefined) close();
       this.entry();
     }
-    this.backend = null; this.builtins = null;
+    this.backend = null; this.builtins = null; this.rendererCommandBridge = null;
   }
   private retainTextureFilter(): void {
     if (this.backend !== null) this.textureFilter = this.backend.backend.images.textureFilter;
@@ -1288,6 +1438,7 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
     await close(() => { this.sdlInput?.close(); this.sdlInput = null; });
     await close(() => { this.window?.close(); this.window = null; });
     await close(() => { this.sourceInput?.close(); this.sourceInput = null; });
+    await close(() => { this.midiInput?.close(); this.midiInput = null; });
     await close(() => { this.glLogging?.close(); this.glLogging = null; });
     await close(() => { this.soundOwner?.close(); });
     this.ui = null; this.session = null; this.rendererConfiguration = null; this.screenshots = null; this.disposed = true;

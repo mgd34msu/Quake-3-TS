@@ -34,7 +34,8 @@ function cinematicMovie(): Uint8Array {
 if (process.env["QUAKE_SOUND_OUTPUT_TEST_CHILD"] !== "1") {
   test("sound output owner in an isolated real SDL dummy process", async () => {
     const child = Bun.spawn([process.execPath, "test", fileURLToPath(import.meta.url)], {
-      env: { ...process.env, SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_SOUND_OUTPUT_TEST_CHILD: "1" },
+      env: { ...process.env, DISPLAY: undefined, WAYLAND_DISPLAY: undefined,
+        SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_SOUND_OUTPUT_TEST_CHILD: "1" },
       stdout: "pipe", stderr: "pipe",
     });
     const [exitCode, stdout, stderr] = await Promise.all([
@@ -47,6 +48,95 @@ if (process.env["QUAKE_SOUND_OUTPUT_TEST_CHILD"] !== "1") {
   if (process.env["SDL_AUDIODRIVER"] !== "dummy") throw new Error("Sound output tests require the dummy driver");
 
   describe("sound output ownership and S_ClearSoundBuffer", () => {
+    test("selected formats preserve source mono transfer, unsigned silence and repaint frame ownership", () => {
+      const bits: readonly (8 | 16)[] = [8, 16], channelCounts: readonly (1 | 2)[] = [1, 2];
+      for (const sampleBits of bits) for (const channels of channelCounts) {
+        const output = new SoundOutput();
+        try {
+          const mixer = output.start({ sampleRate: 48000, sampleBits, channels }, () => 0);
+          expect(output.sampleBits).toBe(sampleBits);
+          expect(output.channels).toBe(channels);
+          expect(mixer.outputChannels).toBe(channels);
+          mixer.queueRaw({ sampleRate: 48000, channels: 2, frameCount: 4, loopStart: null,
+            samples: new Int16Array([-32768, 32767, -1, 255, 256, -256, 32767, -32768]) }, 1);
+          output.repaint({ startFrame: 1, endFrame: 4 });
+          const expected16 = channels === 1 ? [0, -1, 256, 32767] : [0, 0, -1, 255, 256, -256, 32767, -32768];
+          const expected = sampleBits === 16 ? expected16 : expected16.map(sample => (sample >> 8) + 128);
+          expect(Array.from(output.pendingOutput.samples)).toEqual(expected);
+          expect(output.pendingOutput.samples instanceof Uint8Array).toBe(sampleBits === 8);
+          expect(output.queuedFrames).toBe(4);
+          output.repaint({ startFrame: 0, endFrame: 1 });
+          expect(output.queuedFrames).toBe(4);
+          expect(Array.from(output.pendingOutput.samples).slice(0, channels)).toEqual(sampleBits === 16
+            ? channels === 1 ? [-32768] : [-32768, 32767] : channels === 1 ? [0] : [0, 255]);
+          expect(Array.from(output.pendingOutput.samples).slice(channels)).toEqual(expected.slice(channels));
+          output.submit(2);
+          expect(output.queuedFrames).toBe(6);
+          expect(Array.from(output.pendingOutput.samples).slice(4 * channels)).toEqual(new Array<number>(2 * channels).fill(sampleBits === 16 ? 0 : 128));
+          output.clearSoundBuffer();
+          expect(output.queuedFrames).toBe(0);
+          expect(output.deliveryTime).toBe(0);
+          output.submit(1);
+          expect(Array.from(output.pendingOutput.samples)).toEqual(new Array<number>(channels).fill(sampleBits === 16 ? 0 : 128));
+          output.shutdown();
+          output.start({ sampleRate: 48000 }, () => 0);
+          expect(output.sampleBits).toBe(16);
+          expect(output.channels).toBe(2);
+        } finally { output.close(); }
+      }
+    });
+
+    test("mono output uses the source unpanned attenuation for one-shots and loops", () => {
+      const output = new SoundOutput();
+      try {
+        const mixer = output.start({ sampleRate: 48000, sampleBits: 16, channels: 1 }, () => 0);
+        mixer.setEffectsVolume(1);
+        const sound = mono([32767, 32767]);
+        mixer.startSound(sound, { entity: 1, channel: 1, volume: 127, origin: { kind: "fixed", position: vec3(0, 100, 0) } });
+        mixer.setListener(0, vec3(0, 0, 0), [vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1)]);
+        expect(Array.from(mixer.channelVolumes()).map(channel => [channel.left, channel.right])).toEqual([[124, 124]]);
+        output.submit(1);
+        expect(Array.from(output.pendingOutput.samples)).toEqual([15809]);
+        output.clearSoundBuffer();
+        mixer.updateRealLoopingSound(sound, { entity: 1, origin: vec3(0, 100, 0), velocity: vec3(0, 0, 0) });
+        mixer.setListener(0, vec3(0, 0, 0), [vec3(1, 0, 0), vec3(0, 1, 0), vec3(0, 0, 1)]);
+        output.submit(1);
+        // Real loops use source master volume 90, attenuated to 88 at 100 units.
+        expect(Array.from(output.pendingOutput.samples)).toEqual([11219]);
+      } finally { output.close(); }
+    });
+
+    test("selected formats measure native delivery in frames across drain, pause and silence", async () => {
+      const formats: readonly { readonly sampleBits: 8 | 16; readonly channels: 1 | 2 }[] = [
+        { sampleBits: 8, channels: 1 }, { sampleBits: 8, channels: 2 }, { sampleBits: 16, channels: 1 },
+      ];
+      for (const format of formats) {
+        const output = new SoundOutput();
+        try {
+          const mixer = output.start({ sampleRate: 48000, bufferFrames: 256, ...format }, () => 0);
+          mixer.queueRaw(mono(new Array<number>(480).fill(8192)), 1);
+          output.submit(480);
+          output.resume();
+          const deadline = performance.now() + 2000;
+          while (output.queuedFrames !== 0 && performance.now() < deadline) await Bun.sleep(5);
+          expect(output.queuedFrames).toBe(0);
+          output.pause();
+          const delivered = output.deliveryTime;
+          expect(delivered).toBeGreaterThanOrEqual(480);
+          expect(output.pendingOutput.samples.length).toBe(0);
+          await Bun.sleep(10);
+          expect(output.deliveryTime).toBe(delivered);
+          output.repaint({ startFrame: 0, endFrame: delivered + 3 });
+          expect(output.queuedFrames).toBe(3);
+          expect(output.pendingOutput.startFrame).toBe(delivered);
+          expect(Array.from(output.pendingOutput.samples)).toEqual(new Array<number>(3 * format.channels).fill(format.sampleBits === 8 ? 128 : 0));
+          output.clearSoundBuffer();
+          expect(output.deliveryTime).toBe(delivered);
+          expect(output.queuedFrames).toBe(0);
+        } finally { output.close(); }
+      }
+    });
+
     test("cinematics borrows the live output across inert startup, mute and restart", async () => {
       const output = new SoundOutput(), bytes = cinematicMovie();
       const clock = { time: 0, sample(): number { return this.time; } };
@@ -70,22 +160,25 @@ if (process.env["QUAKE_SOUND_OUTPUT_TEST_CHILD"] !== "1") {
         const first = output.start({ sampleRate: 48000 }, () => clock.time);
         first.selectTime(7, 100);
         const active = await play("active");
-        expect(first.rawEnd).toBe(7 + first.rawCapacity);
-        expect(Array.from(first.mix({ startFrame: 7, endFrame: 10 }))).toEqual([1001, 1001, 1001, 1001, 1001, 1001]);
+        // S_RawSamples writes all 65307 resampled frames and wraps its fixed ring.
+        // Final writes use source cells 22579, 22579, 22580. RoQ's mono path
+        // submits the duplicated decode buffer as mono, halving the delta index.
+        expect(first.rawEnd).toBe(7 + 65307);
+        expect(Array.from(first.mix({ startFrame: 7, endFrame: 10 }))).toEqual([12290, 12290, 12290, 12290, 12291, 12291]);
         output.shutdown();
         expect(output.mixer).toBeNull();
         movies.run(active); clock.time += 34; movies.run(active);
         expect(movies.prepareUiRaw(active)).not.toBeNull();
-        expect(first.rawEnd).toBe(7 + first.rawCapacity);
+        expect(first.rawEnd).toBe(7 + 65307);
         const second = output.start({ sampleRate: 48000 }, () => clock.time);
         expect(second).not.toBe(first);
         const restarted = await play("restarted");
-        expect(second.rawEnd).toBe(second.rawCapacity);
-        expect(Array.from(second.mix({ startFrame: 0, endFrame: 3 }))).toEqual([1001, 1001, 1001, 1001, 1001, 1001]);
+        expect(second.rawEnd).toBe(65307);
+        expect(Array.from(second.mix({ startFrame: 0, endFrame: 3 }))).toEqual([12290, 12290, 12290, 12290, 12291, 12291]);
         second.setPlaybackEnabled(false);
         movies.run(restarted); clock.time += 34; movies.run(restarted);
         expect(movies.prepareUiRaw(restarted)).not.toBeNull();
-        expect(second.rawEnd).toBe(second.rawCapacity);
+        expect(second.rawEnd).toBe(65307);
         second.setPlaybackEnabled(true);
         const interrupted = await play("interrupted");
         output.shutdown();
@@ -93,9 +186,9 @@ if (process.env["QUAKE_SOUND_OUTPUT_TEST_CHILD"] !== "1") {
         movies.run(interrupted); clock.time += 34; movies.run(interrupted);
         expect(movies.prepareUiRaw(interrupted)).not.toBeNull();
         expect(third.rawEnd).toBe(0);
-        expect(second.rawEnd).toBe(second.rawCapacity);
+        expect(second.rawEnd).toBe(65307);
         await play("after-replacement");
-        expect(third.rawEnd).toBe(third.rawCapacity);
+        expect(third.rawEnd).toBe(65307);
       } finally { movies.dispose(); output.close(); }
     });
 

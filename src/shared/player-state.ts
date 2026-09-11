@@ -1,8 +1,9 @@
-// Ported from id Software's code/game/q_shared.h and bg_public.h.
+// Ported from id Software's code/game/q_shared.h, bg_public.h and bg_misc.c.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 
 import { vec3 } from "../core/math.ts";
 import type { Vec3 } from "../core/math.ts";
+import { nativeAtof } from "../core/native-numeric.ts";
 import { MoveType, Weapon, WeaponState, statSchema } from "./definitions.ts";
 import type { Product } from "./definitions.ts";
 
@@ -78,8 +79,33 @@ export interface PredictableEvent {
   readonly parameter: number;
 }
 
+export interface PredictableEventDebug {
+  readonly kind: "source-debug";
+  readonly module: "game" | "cgame";
+  showEvents(): string;
+  print(message: string): void;
+}
+
+// bg_misc.c:eventnames, including its omitted EV_OBELISKPAIN entry.
+const EVENT_NAMES: readonly string[] = [
+  "EV_NONE", "EV_FOOTSTEP", "EV_FOOTSTEP_METAL", "EV_FOOTSPLASH", "EV_FOOTWADE", "EV_SWIM",
+  "EV_STEP_4", "EV_STEP_8", "EV_STEP_12", "EV_STEP_16", "EV_FALL_SHORT", "EV_FALL_MEDIUM", "EV_FALL_FAR",
+  "EV_JUMP_PAD", "EV_JUMP", "EV_WATER_TOUCH", "EV_WATER_LEAVE", "EV_WATER_UNDER", "EV_WATER_CLEAR",
+  "EV_ITEM_PICKUP", "EV_GLOBAL_ITEM_PICKUP", "EV_NOAMMO", "EV_CHANGE_WEAPON", "EV_FIRE_WEAPON",
+  "EV_USE_ITEM0", "EV_USE_ITEM1", "EV_USE_ITEM2", "EV_USE_ITEM3", "EV_USE_ITEM4", "EV_USE_ITEM5",
+  "EV_USE_ITEM6", "EV_USE_ITEM7", "EV_USE_ITEM8", "EV_USE_ITEM9", "EV_USE_ITEM10", "EV_USE_ITEM11",
+  "EV_USE_ITEM12", "EV_USE_ITEM13", "EV_USE_ITEM14", "EV_USE_ITEM15", "EV_ITEM_RESPAWN", "EV_ITEM_POP",
+  "EV_PLAYER_TELEPORT_IN", "EV_PLAYER_TELEPORT_OUT", "EV_GRENADE_BOUNCE", "EV_GENERAL_SOUND",
+  "EV_GLOBAL_SOUND", "EV_GLOBAL_TEAM_SOUND", "EV_BULLET_HIT_FLESH", "EV_BULLET_HIT_WALL", "EV_MISSILE_HIT",
+  "EV_MISSILE_MISS", "EV_MISSILE_MISS_METAL", "EV_RAILTRAIL", "EV_SHOTGUN", "EV_BULLET", "EV_PAIN",
+  "EV_DEATH1", "EV_DEATH2", "EV_DEATH3", "EV_OBITUARY", "EV_POWERUP_QUAD", "EV_POWERUP_BATTLESUIT",
+  "EV_POWERUP_REGEN", "EV_GIB_PLAYER", "EV_SCOREPLUM", "EV_PROXIMITY_MINE_STICK", "EV_PROXIMITY_MINE_TRIGGER",
+  "EV_KAMIKAZE", "EV_OBELISKEXPLODE", "EV_INVUL_IMPACT", "EV_JUICED", "EV_LIGHTNINGBOLT", "EV_DEBUG_LINE",
+  "EV_STOPLOOPINGSOUND", "EV_TAUNT",
+];
+
 export type PlayerStateFields<M extends number = number, W extends number = number, S extends number = number> =
-  Omit<PlayerStateRecord<M, W, S>, "copy" | "copyFrom" | "health" | "addEvent">;
+  Omit<PlayerStateRecord<M, W, S>, "copy" | "copyFrom" | "health" | "addEvent" | "setEventDebug">;
 
 function copyVector(value: Vec3): Vec3 {
   return { x: value.x, y: value.y, z: value.z };
@@ -91,6 +117,7 @@ function copySlots(target: PlayerStateSlots, source: PlayerStateSlots): void {
 
 /** Owned playerState_t storage; the engine transports game-defined integer words unchanged. */
 export class PlayerStateRecord<M extends number, W extends number, S extends number> {
+  #eventDebug: PredictableEventDebug | null = null;
   commandTime = 0;
   pmType: M;
   bobCycle = 0;
@@ -203,7 +230,16 @@ export class PlayerStateRecord<M extends number, W extends number, S extends num
   get health(): number { return this.stats.get(statSchema(this.product).health); }
   set health(value: number) { this.stats.set(statSchema(this.product).health, value); }
 
+  setEventDebug(debug: PredictableEventDebug | null): void { this.#eventDebug = debug; }
+
   addEvent(event: number, parameter = 0): PredictableEvent {
+    const debug = this.#eventDebug;
+    if (debug !== null && nativeAtof(debug.showEvents().slice(0, 255)) !== 0) {
+      const name = EVENT_NAMES[event];
+      if (name === undefined) throw new RangeError(`bg_misc.c eventnames has no entry for ${event}`);
+      const label = debug.module === "game" ? " game" : "Cgame";
+      debug.print(`${label} event svt ${String(this.pmoveFramecount).padStart(5)} -> ${String(this.eventSequence).padStart(5)}: num = ${name.padStart(20)} parm ${parameter}\n`);
+    }
     const sequence = this.eventSequence;
     this.events.set(sequence & 1, event);
     this.eventParms.set(sequence & 1, parameter);

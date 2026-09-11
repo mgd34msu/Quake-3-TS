@@ -8,6 +8,8 @@ import { infoValueForKey } from "../../core/info-string.ts";
 import { KeyCatcher, KeyCode } from "../../core/key-codes.ts";
 import { qvmFloatToInt } from "../../core/numeric.ts";
 import { sourceCommandText } from "../../core/text.ts";
+import { isPrereleaseTeamArenaDemo, RETAIL_PRODUCT_PROFILE } from "../../core/product-profile.ts";
+import type { ProductProfile } from "../../core/product-profile.ts";
 import { validateCdKey } from "../../engine/cd-key.ts";
 import type { CommonCdKeyState } from "../../engine/cd-key.ts";
 import type { ClientKeys } from "../../engine/client-keys.ts";
@@ -36,6 +38,7 @@ import type { TeamArenaSettings } from "./settings.ts";
 import type { TeamArenaTeamInfo } from "./team-info.ts";
 
 export interface TeamArenaMenuScriptServices {
+  readonly productProfile?: ProductProfile;
   readonly cvars: TeamArenaUiCvars;
   readonly commands: CommandBuffer;
   readonly keys: ClientKeys;
@@ -304,7 +307,8 @@ export class TeamArenaMenuScripts implements UiExternalScriptHost {
       case "loadcontrols": services.runtime.reloadBindings(); services.assertActive(); return;
       case "clearerror": this.set("com_errorMessage", ""); return;
       case "loadgameinfo":
-        await services.game.parseGameInfo("gameinfo.txt"); services.assertActive();
+        await services.game.parseGameInfo(isPrereleaseTeamArenaDemo(services.productProfile ?? RETAIL_PRODUCT_PROFILE)
+          ? "demogameinfo.txt" : "gameinfo.txt"); services.assertActive();
         services.scores.loadBestScores(this.map().mapLoadName, infoSlot(services.game.gameTypes, this.word("ui_gameType")).gtEnum);
         services.assertActive(); return;
       case "resetscores": services.scores.clearScores(); services.assertActive(); return;

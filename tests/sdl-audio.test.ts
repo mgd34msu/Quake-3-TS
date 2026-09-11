@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { describe, expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { SdlAudioDevice } from "../src/platform/audio.ts";
+import { SdlAudioDevice, SdlAudioUnavailableError } from "../src/platform/audio.ts";
 import { runAudioSmoke } from "../tools/audio-smoke.ts";
 
 if (process.env["QUAKE_AUDIO_TEST_CHILD"] !== "1") {
   test("SDL audio native suite in isolated dummy-driver process", async () => {
     const child = Bun.spawn([process.execPath, "test", fileURLToPath(import.meta.url)], {
-      env: { ...process.env, SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_AUDIO_TEST_CHILD: "1" },
+      env: { ...process.env, DISPLAY: undefined, WAYLAND_DISPLAY: undefined,
+        SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_AUDIO_TEST_CHILD: "1" },
       stdout: "pipe", stderr: "pipe",
     });
     const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
@@ -17,6 +18,37 @@ if (process.env["QUAKE_AUDIO_TEST_CHILD"] !== "1") {
 } else {
   if (process.env["SDL_AUDIODRIVER"] !== "dummy") throw new Error("SDL audio tests require the dummy driver");
   describe("SDL queued audio", () => {
+    test("opens every source width/channel combination by an enumerated device name", () => {
+      const names = SdlAudioDevice.outputDeviceNames();
+      const deviceName = names[0];
+      if (deviceName === undefined) throw new Error("Dummy driver did not enumerate an output device");
+      const bits: readonly (8 | 16)[] = [8, 16], channelCounts: readonly (1 | 2)[] = [1, 2];
+      for (const sampleBits of bits) for (const channels of channelCounts) {
+        const device = SdlAudioDevice.open({ sampleRate: 48000, channels, sampleBits, deviceName, bufferFrames: 256 });
+        try {
+          expect(device.sampleBits).toBe(sampleBits);
+          expect(device.channels).toBe(channels);
+          expect(device.deviceName).toBe(deviceName);
+          const data = sampleBits === 8 ? new Uint8Array(10 * channels).fill(128) : new Int16Array(10 * channels);
+          device.queue(data.subarray(channels, 6 * channels));
+          expect(device.queuedFrames).toBe(5);
+          expect(SdlAudioDevice.outputDeviceNames()).toContain(deviceName);
+          expect(device.queuedFrames).toBe(5);
+          expect(() => device.queue(sampleBits === 8 ? new Int16Array(channels) : new Uint8Array(channels))).toThrow("device format");
+          device.clear();
+          expect(device.queuedFrames).toBe(0);
+          device.queue(sampleBits === 8 ? new Uint8Array(device.maxQueuedFrames * channels).fill(128)
+            : new Int16Array(device.maxQueuedFrames * channels));
+          expect(device.queuedFrames).toBe(96000);
+          expect(() => device.queue(data)).toThrow("two-second limit");
+        } finally { device.close(); }
+      }
+      expect(() => SdlAudioDevice.open({ sampleRate: 48000, channels: 2, deviceName: "quake3-missing-dummy-output" }))
+        .toThrow(SdlAudioUnavailableError);
+      const replacement = SdlAudioDevice.open({ sampleRate: 48000, channels: 2, deviceName });
+      replacement.close();
+    });
+
     test("native paused queue, dummy playback drain and clear", async () => {
       expect(await runAudioSmoke()).toContain("2048 paused frames");
     });
@@ -95,6 +127,9 @@ if (process.env["QUAKE_AUDIO_TEST_CHILD"] !== "1") {
     });
 
     test("validates requested format before opening a native device", () => {
+      for (const deviceName of ["", "dummy\0suffix"]) {
+        expect(() => SdlAudioDevice.open({ sampleRate: 48000, channels: 2, deviceName })).toThrow("device name");
+      }
       for (const sampleRate of [0, -1, 7999, 192001, 48000.5, NaN, Infinity]) {
         expect(() => SdlAudioDevice.open({ sampleRate, channels: 2 })).toThrow("sample rate");
       }

@@ -110,6 +110,7 @@ interface DriverFixture {
   readonly server: RecorderServer;
   readonly client: RecorderClient;
   readonly trace: string[];
+  readonly services: CommonServerConstruction;
 }
 
 function initializationRoots() {
@@ -649,6 +650,7 @@ async function fixture(profile: "dedicated" | "client", startupText = "", needCd
   writeFileSync(join(dataPath, "baseq3", "productid.txt"), SOURCE_PRODUCT_ID);
   const trace: string[] = [], platform = new RecorderPlatform(trace), client = new RecorderClient(trace, needCd);
   let server: RecorderServer | null = null;
+  let construction: CommonServerConstruction | null = null;
   const build: CommonBuildProfile = profile === "dedicated" ? { kind: "dedicated" } : {
     kind: "client",
     client: {
@@ -663,15 +665,43 @@ async function fixture(profile: "dedicated" | "client", startupText = "", needCd
     build, platformPrint: text => { trace.push(`print:${text}`); }, client: profile === "dedicated" ? { kind: "absent" } : { kind: "available", runtime: client },
     systemClock: platform, createPlatform: () => platform,
     createServer: (services: CommonServerConstruction): CommonServerRuntime => {
+      construction = services;
       if (profile === "client") observePureClearing(services.common, trace, "client:pure-clear");
       client.bind(services.common.cvars); server = new RecorderServer(trace, platform); return server;
     },
     resolveCommand: () => undefined,
   };
   const driver = await CommonFrameDriver.open(options); drivers.push(driver);
-  if (server === null) throw new Error("Missing recorder server");
-  return { driver, platform, server, client, trace };
+  if (server === null || construction === null) throw new Error("Missing recorder server");
+  return { driver, platform, server, client, trace, services: construction };
 }
+
+test("renderer callbacks borrow a live operation and retire idle synchronous scopes", async () => {
+  const { driver, services } = await fixture("client");
+  expect(() => services.assertCurrentOperation()).toThrow("current owned driver operation");
+  let descendant: Promise<void> | null = null;
+  services.runRendererCallback(() => {
+    services.assertCurrentOperation();
+    expect(services.runRendererCallback(() => 17)).toBe(17);
+    descendant = Promise.resolve().then(() => {
+      expect(() => services.assertCurrentOperation()).toThrow("current owned driver operation");
+    });
+  });
+  await descendant;
+  expect(() => services.assertCurrentOperation()).toThrow("current owned driver operation");
+  services.common.commands.register("renderer_scope", () => {
+    services.assertCurrentOperation();
+    services.runRendererCallback(() => { services.assertCurrentOperation(); });
+    services.assertCurrentOperation();
+  });
+  services.common.commands.append("renderer_scope\n");
+  await driver.frame();
+  const failure = new Error("renderer source failure");
+  expect(() => services.runRendererCallback(() => { throw failure; })).toThrow(failure);
+  expect(services.runRendererCallback(() => 23)).toBe(23);
+  await driver.close();
+  expect(() => services.runRendererCallback(() => 0)).toThrow("active common source work");
+});
 
 describe("Unix Sys_Init common startup", () => {
   for (const dedicated of [0, 1]) {
@@ -983,7 +1013,7 @@ describe("common event payload lifetimes", () => {
     const expected = bytes.slice(), recordCvars = new CvarRegistry(); recordCvars.set("journal", "1");
     const record = new CommonJournal(recordCvars, () => common.files, () => undefined, () => undefined, () => undefined, memory);
     record.initialize(); expect(record.getEvent({ getEvent: () => packet })).toBe(packet); record.shutdown(); record.retire();
-    expect([...readFileSync(join(common.roots.homePath, "baseq3", "journal.dat")).subarray(32)]).toEqual([...expected]);
+    expect([...readFileSync(Buffer.concat([common.roots.homePath.resolvedBytes(), Buffer.from("/baseq3/journal.dat")])).subarray(32)]).toEqual([...expected]);
     const replayCvars = new CvarRegistry(); replayCvars.set("journal", "2");
     const replay = new CommonJournal(replayCvars, () => common.files, () => undefined, () => undefined, () => undefined, memory);
     replay.initialize();
@@ -1105,7 +1135,7 @@ describe("common recoverable error entry", () => {
     test(`${code} clears the actual loaded restriction before the error clock and cleanup`, async () => {
       const f = await fixture("client", "+set dedicated 1"), common = f.driver.common, files = common.files;
       const mounted = files.current, error = new CommonError(code, "pure owner error");
-      writeFileSync(join(common.roots.dataPath, "baseq3", "local.txt"), "local asset");
+      writeFileSync(Buffer.concat([common.roots.dataPath.resolvedBytes(), Buffer.from("/baseq3/local.txt")]), "local asset");
       const assertCurrentOperation = (): void => { f.driver.assertCurrentOperation(); };
       f.server.frame = async () => {
         await files.setServerLoadedPaks("123", "remote/pak", assertCurrentOperation);
@@ -1141,7 +1171,7 @@ describe("common recoverable error entry", () => {
         { name: encoder.encode("default.cfg"), data: encoder.encode("\n"), method: 0, utf8: false },
         { name: encoder.encode("shared.txt"), data: encoder.encode(value), method: 0, utf8: false },
       ] satisfies Parameters<typeof sourceZip>[0];
-      writeFileSync(join(common.roots.dataPath, "baseq3", `${name}.pk3`), sourceZip(entries));
+      writeFileSync(Buffer.concat([common.roots.dataPath.resolvedBytes(), Buffer.from(`/baseq3/${name}.pk3`)]), sourceZip(entries));
     }
     const assertCurrentOperation = (): void => { f.driver.assertCurrentOperation(); };
     let checkedClock = false;

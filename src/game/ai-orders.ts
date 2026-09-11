@@ -9,6 +9,7 @@ import { dot3, length3, sub3 } from "../core/math.ts";
 import { GameType, Team } from "../shared/definitions.ts";
 import type { GameAiContext } from "./ai-context.ts";
 import { botAggression, botEntityVisible, entityCarriesCubes, entityCarriesFlag } from "./ai-combat.ts";
+import { botPrintTeamGoal } from "./ai-command.ts";
 import { BotCtfFlag, BotInventory, BotLongTermGoal, BotTeamTaskPreference,
   CTF_GETFLAG_TIME, CTF_RETURNFLAG_TIME, CTF_ROAM_TIME, CTF_RUSHBASE_TIME,
   TEAM_ACCOMPANY_TIME, TEAM_ATTACKENEMYBASE_TIME, TEAM_DEFENDKEYAREA_TIME, TEAM_HARVEST_TIME } from "./ai-definitions.ts";
@@ -381,6 +382,7 @@ export function botCTFSeekGoals(context: GameAiContext, state: BotState): void {
   } else if (random < defense && goals.ctfRedFlag.area !== 0 && goals.ctfBlueFlag.area !== 0) defend(context, state, botTeamFlag(context, state));
   else roam(context, state);
   state.ownDecisionTime = ownDecisionDeadline(context.time);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botCTFRetreatGoals(context: GameAiContext, state: BotState): void {
@@ -434,6 +436,7 @@ export function bot1FCTFSeekGoals(context: GameAiContext, state: BotState): void
   } else if (random < defense && goals.ctfRedFlag.area !== 0 && goals.ctfBlueFlag.area !== 0) defend(context, state, botTeamFlag(context, state));
   else roam(context, state);
   state.ownDecisionTime = ownDecisionDeadline(context.time);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function bot1FCTFRetreatGoals(context: GameAiContext, state: BotState): void {

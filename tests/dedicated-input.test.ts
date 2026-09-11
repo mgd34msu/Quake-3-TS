@@ -390,7 +390,7 @@ if (process.argv.includes("--dedicated-input-child")) {
     try {
       for (let index = 0; index < MAX_UNIX_SYSTEM_EVENTS; index++) input.queueEvent({ kind: "console", time: 1, text: String(index) });
       expect(() => input.queueEvent({ kind: "console", time: 0, text: "\u0100" })).toThrow("source bytes");
-      expect(() => input.queueEvent({ kind: "packet", time: 0, from: { kind: "ipv4", host: localhost, port: 0 }, payload: Uint8Array.of(1) })).toThrow("IPv4 sender");
+      expect(() => input.queueEvent({ kind: "packet", time: 0, from: { kind: "ipv4", host: localhost, port: -1 }, payload: Uint8Array.of(1) })).toThrow("IPv4 sender");
       expect(prints).toBe(0); expect(samples).toBe(0);
       for (let index = 0; index < MAX_UNIX_SYSTEM_EVENTS; index++) expect(consoleText(getDedicatedEvent(input))).toBe(String(index));
     } finally { input.close(); }
@@ -426,7 +426,7 @@ if (process.argv.includes("--dedicated-input-child")) {
       expect(getDedicatedEvent(input)).toEqual({ kind: "none", time: 66 });
       expect(() => input.queueEvent({ kind: "console", time: 2147483648, text: "bad" })).toThrow("signed 32-bit");
       expect(() => input.queueEvent({ kind: "console", time: 1, text: "\u0100" })).toThrow("source bytes");
-      expect(() => input.queueEvent({ kind: "packet", time: 1, from: { kind: "ipv4", host: localhost, port: 0 }, payload: bytes })).toThrow("IPv4 sender");
+      expect(() => input.queueEvent({ kind: "packet", time: 1, from: { kind: "ipv4", host: localhost, port: -1 }, payload: bytes })).toThrow("IPv4 sender");
     } finally { input.close(); }
   });
 

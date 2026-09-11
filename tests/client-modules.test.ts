@@ -73,7 +73,7 @@ for (const initialProduct of ["baseq3", "missionpack"] satisfies readonly Produc
         const selected = acquireClientModule({ ...unaccounted, files: files.current, product: files.roots.product, role: "ui", registry });
         expect(selected?.mode).toBe("retail-replacement");
         expect(selected?.product).toBe(product);
-        expect(files.writable.rootPath).toBe(join(files.roots.homePath, product));
+        expect(files.writable.rootPath).toBe(join(files.roots.homePath.sourceText, product));
         expect(cvars.get("fs_game")?.modified).toBe(false);
         selected?.registration.free();
       }

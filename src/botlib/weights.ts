@@ -38,6 +38,7 @@ export interface BotRandom {
 }
 
 export interface WeightConfigStoreOptions {
+  readonly debug?: { readonly milliseconds: () => number; readonly developer: () => boolean };
   readonly memory?: BotMemory;
   readonly reloadCharacters?: boolean | (() => boolean);
   readonly print?: (severity: 1 | 2 | 3 | 4, text: string) => undefined;
@@ -825,6 +826,7 @@ export class WeightConfigStore {
   private readonly resolver: BotScriptReader;
   private readonly reloadCharacters: () => boolean;
   private readonly print: WeightConfigStoreOptions["print"];
+  private readonly debug: WeightConfigStoreOptions["debug"];
   private readonly maxCachedConfigs: number;
   private readonly preprocessorOptions: ScriptPreprocessorOptions;
   private readonly cached: (OwnedWeightConfig | undefined)[] = [];
@@ -837,6 +839,7 @@ export class WeightConfigStore {
     const reloadCharacters = options.reloadCharacters ?? false;
     this.reloadCharacters = typeof reloadCharacters === "function" ? reloadCharacters : () => reloadCharacters;
     this.print = options.print;
+    this.debug = options.debug;
     this.maxCachedConfigs = positiveInteger(
       options.maxCachedConfigs,
       MAX_CACHED_WEIGHT_CONFIGS,
@@ -849,6 +852,7 @@ export class WeightConfigStore {
   }
 
   load(path: string): WeightConfig {
+    const startTime = this.debug?.milliseconds();
     const generation = this.generation;
     const reload = this.reloadCharacters();
     this.requireCurrent(generation, path);
@@ -869,7 +873,7 @@ export class WeightConfigStore {
         throw new WeightConfigLoadError(`weight config cache is full at ${this.maxCachedConfigs} entries`);
       }
     }
-    return this.readAndRetain(path, available, generation);
+    return this.readAndRetain(path, available, generation, startTime);
   }
 
   free(config: WeightConfig): void {
@@ -899,6 +903,7 @@ export class WeightConfigStore {
     path: string,
     available: number,
     generation: number,
+    startTime: number | undefined,
   ): OwnedWeightConfig {
     const config = this.read(path, generation);
     if (generation !== this.generation) {
@@ -907,6 +912,13 @@ export class WeightConfigStore {
     }
     this.owned.add(config);
     this.print?.(1, `loaded ${path}\n`);
+    this.requireCurrent(generation, path);
+    if (this.debug !== undefined && startTime !== undefined && this.debug.developer()) {
+      this.requireCurrent(generation, path);
+      const elapsed = (this.debug.milliseconds() - startTime) | 0;
+      this.requireCurrent(generation, path);
+      this.print?.(1, `weights loaded in ${elapsed} msec\n`);
+    }
     this.requireCurrent(generation, path);
     const reload = this.reloadCharacters();
     this.requireCurrent(generation, path);
@@ -952,6 +964,7 @@ export class WeightConfigStore {
       resolve: request => invokeCallback(() => this.resolver.resolve(request)),
     }, {
       ...this.preprocessorOptions, globals: this.resolver.globals,
+      ...(this.resolver.debugEval === undefined ? {} : { debugEval: (text: string) => invokeCallback(() => this.resolver.debugEval?.(text)) }),
       ...(now === undefined ? {} : { now: () => invokeCallback(now) }),
       report: diagnostic => {
         reported.push(diagnostic);

@@ -99,7 +99,7 @@ export class AasWorldState implements AasWorld {
   private clusterView: MutableAasCluster[];
   private clusterCount: number;
 
-  constructor(parsed: AasWorld) {
+  constructor(parsed: AasWorld, private readonly sampleDebug: ((severity: 1 | 3, text: string) => void) | null = null) {
     this.source = parsed.source;
     this.version = parsed.version;
     this.bspChecksum = parsed.bspChecksum;
@@ -289,11 +289,20 @@ export class AasWorldState implements AasWorld {
     }
     let nodeNumber = 1;
     while (nodeNumber > 0) {
+      if (this.sampleDebug !== null && nodeNumber >= this.nodes.length) {
+        this.sampleDebug(3, `nodenum = ${nodeNumber} >= aasworld.numnodes = ${this.nodes.length}\n`);
+        return 0;
+      }
       const node = cell(this.nodes, nodeNumber, "AAS nodes");
+      if (this.sampleDebug !== null && (node.plane < 0 || node.plane >= this.planes.length)) {
+        this.sampleDebug(3, `node->planenum = ${node.plane} >= aasworld.numplanes = ${this.planes.length}\n`);
+        return 0;
+      }
       const plane = cell(this.planes, node.plane, "AAS planes");
       const distance = Math.fround(dot3(point, plane.normal) - plane.distance);
       nodeNumber = distance > 0 ? node.children[0] : node.children[1];
     }
+    if (nodeNumber === 0 && this.sampleDebug !== null) this.sampleDebug(1, "in solid\n");
     return nodeNumber === 0 ? 0 : -nodeNumber;
   }
 

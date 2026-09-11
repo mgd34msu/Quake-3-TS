@@ -259,7 +259,8 @@ export class AudioMixer {
   private consoleOutput: ConsoleOutput | null = null;
   private soundMemory: MixerSoundMemory | null = null;
 
-  constructor(outputRate: number, private readonly milliseconds: () => number, capacity = 96) {
+  constructor(outputRate: number, private readonly milliseconds: () => number, capacity = 96,
+    readonly outputChannels: 1 | 2 = 2) {
     requirePositiveInteger(outputRate, "output rate");
     requirePositiveInteger(capacity, "channel capacity");
     this.outputRate = outputRate;
@@ -380,10 +381,11 @@ export class AudioMixer {
       if (!Number.isInteger(options.entity) || int32(options.entity) !== options.entity) {
         throw new RangeError("fixed-origin entity must be a signed 32-bit integer");
       }
-    } else {
-      requireEntity(options.entity);
+    } else if (!Number.isInteger(options.entity) || options.entity < 0 || options.entity > MAX_GENTITIES) {
+      // S_StartSound accepts MAX_GENTITIES. A matching listener never reads
+      // loopSounds; resolveOrigin checks bounds if later spatialization does.
+      throw new RangeError(`entity must be an integer from 0 through ${MAX_GENTITIES}`);
     }
-    if (options.origin.kind === "entity") requireEntity(options.origin.entity);
     requireChannel(options.channel);
     requireChannelVolume(options.volume);
     const prepared = this.prepare(sound);
@@ -797,7 +799,7 @@ export class AudioMixer {
   }
 
   private spatializeOrigin(position: Vec3, volume: number): StereoVolume {
-    return spatializeSoundOrigin(position, this.listenerOrigin, this.listenerAxis, volume, 2);
+    return spatializeSoundOrigin(position, this.listenerOrigin, this.listenerAxis, volume, this.outputChannels);
   }
 
   private effectSample(prepared: PreparedSound, outputFrame: number): number {

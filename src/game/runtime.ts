@@ -146,6 +146,7 @@ export type GameBotFactory =
   | { readonly kind: "unavailable"; readonly reason: string }
   | { readonly kind: "source"; attach(game: GameRuntime): Extract<GameBotServices, { kind: "available" }> };
 export interface GameRuntimeOptions {
+  readonly sourceDebug?: boolean;
   readonly product: Product;
   readonly map: Pick<BspMap, "entities">;
   readonly collision: CollisionWorld;
@@ -191,6 +192,9 @@ class GameModuleState {
     this.registeredItems = new ItemRegistry(options.product);
     const maxClients = options.cvars.get("sv_maxclients"), module = this;
     this.pool = new EntityPool({ product: options.product,
+      ...(options.sourceDebug ? { eventDebug: { kind: "source-debug", module: "game",
+        showEvents: () => options.cvars.get("showevents")?.value ?? "",
+        print: (text: string) => { this.engine.print(text); } } } : {}),
       maxClients: nativeAtoi(maxClients?.latchedValue ?? maxClients?.value ?? "8"),
       get mapStartTime() { return module.level.startTime; },
       time: () => this.level.time, print: text => { this.engine.print(text); },

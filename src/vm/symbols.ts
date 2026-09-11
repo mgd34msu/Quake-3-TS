@@ -148,7 +148,7 @@ export class QvmSymbols {
     options.files.freeFile(file);
   }
 
-  printProfile(print: (text: string) => void): void {
+  printProfile(print: (text: string) => void, debugEnabled = false): void {
     this.assertLive();
     if (this.parsedCount === 0) return;
     const sorted = this.records.slice(0, this.parsedCount);
@@ -156,8 +156,10 @@ export class QvmSymbols {
     for (const record of sorted) total += record.data.getInt32(8, true);
     sorted.sort((left, right) => left.data.getInt32(8, true) - right.data.getInt32(8, true));
     if (total === 0) {
-      // The release interpreter does not increment these fields. C's NaN-to-int conversion has no defined percentage.
-      print("vmprofile: percentages are undefined with zero total instructions; DEBUG_VM is disabled.\n");
+      // C's NaN-to-int conversion has no defined percentage, including after resetting a debug profile.
+      print(debugEnabled
+        ? "vmprofile: percentages are undefined with zero total instructions.\n"
+        : "vmprofile: percentages are undefined with zero total instructions; DEBUG_VM is disabled.\n");
     }
     for (const record of sorted) {
       this.assertLive();

@@ -1,6 +1,8 @@
-// Port of id Software's code/qcommon/common.c initialized, non-HUNK_DEBUG allocator.
+// Port of id Software's code/qcommon/common.c allocator with managed debug metadata.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import { CommonError } from "./common-error.ts";
+import { captureAllocationProvenance } from "./allocation-provenance.ts";
+import type { AllocationProvenance } from "./zone.ts";
 
 const HUNK_MAGIC = 0x89537892;
 const HUNK_FREE_MAGIC = 0x89537893;
@@ -8,6 +10,10 @@ const HEADER_BYTES = 8;
 const MEBIBYTE = 1024 * 1024;
 
 export type HunkPreference = "low" | "high" | "dontcare";
+/** Managed metadata over release32 reservations; no native debug header is charged. */
+export interface HunkDebugProfile {
+  writeLog(text: string): void;
+}
 export interface HunkAllocation {
   readonly kind: "permanent" | "temporary";
   readonly byteOffset: number;
@@ -63,6 +69,7 @@ interface AllocationRecord {
   readonly size: number;
   readonly end: number;
   readonly kind: "permanent" | "temporary";
+  readonly provenance: AllocationProvenance | null;
   valid: boolean;
 }
 
@@ -90,13 +97,15 @@ export class HunkArena {
   private readonly allocations = new Map<HunkAllocation, AllocationRecord>();
   private clearing = false;
 
-  constructor(readonly byteLength: number, private readonly print: (text: string) => void) {
+  constructor(readonly byteLength: number, private readonly print: (text: string) => void, private readonly debug?: HunkDebugProfile) {
     signedInteger(byteLength, "Hunk capacity");
     if (byteLength <= 0 || byteLength % 32 !== 0) throw new RangeError("Hunk capacity must be positive and 32-byte aligned");
     this.storage = new ArrayBuffer(byteLength);
     this.data = new Uint8Array(this.storage);
     this.headers = new DataView(this.storage);
   }
+
+  get debugEnabled(): boolean { return this.debug !== undefined; }
 
   private swapBanks(): void {
     if (this.temporary.temp !== this.temporary.permanent) return;
@@ -122,18 +131,26 @@ export class HunkArena {
     return handle;
   }
 
-  allocate(size: number, preference: HunkPreference): HunkAllocation {
+  allocate(size: number, preference: HunkPreference, provenance: AllocationProvenance | null = null): HunkAllocation {
     const rounded = alignedSize(size, 32, 0);
     // Even an explicit side preference only asks the original high-water heuristic to swap.
     if (preference === "dontcare" || this.temporary.temp !== this.temporary.permanent) this.swapBanks();
     else if ((preference === "low" && this.permanent !== this.low) || (preference === "high" && this.permanent !== this.high)) this.swapBanks();
-    if (this.low.temp + this.high.temp + rounded > this.byteLength) throw new CommonError("drop", `Hunk_Alloc failed on ${rounded}`);
+    if (this.low.temp + this.high.temp + rounded > this.byteLength) {
+      if (this.debug !== undefined) {
+        this.log(text => this.debug?.writeLog(text));
+        this.log(text => this.debug?.writeLog(text), true);
+      }
+      throw new CommonError("drop", `Hunk_Alloc failed on ${rounded}`);
+    }
     const selected = this.permanent;
     const start = selected === this.low ? selected.permanent : this.byteLength - selected.permanent - rounded;
     selected.permanent += rounded;
     selected.temp = selected.permanent;
     this.data.fill(0, start, start + rounded);
-    return this.allocation({ bank: selected, start, size: rounded, end: selected.permanent, kind: "permanent", valid: true }, start, size);
+    return this.allocation({ bank: selected, start, size: rounded, end: selected.permanent, kind: "permanent", valid: true,
+      provenance: this.debug === undefined ? null : provenance === null
+        ? captureAllocationProvenance("Hunk_Alloc") : { ...provenance } }, start, size);
   }
 
   allocateTemp(size: number): HunkAllocation {
@@ -146,7 +163,7 @@ export class HunkArena {
     if (selected.temp > selected.tempHighwater) selected.tempHighwater = selected.temp;
     this.headers.setUint32(start, HUNK_MAGIC, true);
     this.headers.setInt32(start + 4, rounded, true);
-    return this.allocation({ bank: selected, start, size: rounded, end: selected.temp, kind: "temporary", valid: true }, start + HEADER_BYTES, size);
+    return this.allocation({ bank: selected, start, size: rounded, end: selected.temp, kind: "temporary", valid: true, provenance: null }, start + HEADER_BYTES, size);
   }
 
   freeTemp(handle: HunkAllocation): void {
@@ -215,11 +232,34 @@ export class HunkArena {
       permanentBank: this.permanent === this.low ? "low" : "high", temporaryBank: this.temporary === this.low ? "low" : "high" };
   }
 
-  /** HUNK_DEBUG alone links hunkblocks; the source release log list is empty. */
+  /** Newest first, grouped by case-insensitive file and line in Hunk_SmallLog.
+   * Retired managed allocations are omitted, including after clearToMark. */
   log(write: (text: string) => void, small = false): void {
     write(`\r\n================\r\nHunk ${small ? "Small log" : "log"}\r\n================\r\n`);
-    write("0 Hunk memory\r\n");
-    write("0 hunk blocks\r\n");
+    let total = 0, count = 0;
+    if (this.debug !== undefined) {
+      const records = [...this.allocations.values()].filter(record => record.kind === "permanent").reverse();
+      const printed = new Set<AllocationRecord>();
+      for (const record of records) {
+        if (printed.has(record)) continue;
+        printed.add(record);
+        let size = record.size;
+        const origin = record.provenance;
+        if (small && origin !== null) {
+          for (const other of records) {
+            if (!printed.has(other) && other.provenance !== null && other.provenance.line === origin.line
+              && other.provenance.file.toLowerCase() === origin.file.toLowerCase()) {
+              printed.add(other); size = (size + other.size) | 0;
+            }
+          }
+        }
+        total = (total + size) | 0; count++;
+        const location = origin === null ? "<unattributed>" : `${origin.file}, line: ${origin.line} (${origin.label})`;
+        write(`size = ${String(size).padStart(8)}: ${location}\r\n`);
+      }
+    }
+    write(`${total} Hunk memory\r\n`);
+    write(`${count} hunk blocks\r\n`);
   }
 
   private reset(): void {
@@ -265,7 +305,7 @@ export class HunkArena {
 
 /** Engine owns com_hunkMegs registration/latching. Preinitialization Z_Malloc is a separate zone lifetime. */
 export function initializeHunk(
-  options: { readonly megs: number; readonly dedicated: boolean; readonly filesystemLoadStack: number },
+  options: { readonly megs: number; readonly dedicated: boolean; readonly filesystemLoadStack: number; readonly debug?: HunkDebugProfile },
   print: (text: string) => void,
   host: HunkClearHost | null,
   adopt?: (arena: HunkArena) => void,
@@ -277,7 +317,7 @@ export function initializeHunk(
   if (options.megs < minimum) print(options.dedicated
     ? `Minimum com_hunkMegs for a dedicated server is ${minimum}, allocating ${megs} megs.\n`
     : `Minimum com_hunkMegs is ${minimum}, allocating ${megs} megs.\n`);
-  const arena = new HunkArena(megs * MEBIBYTE, print);
+  const arena = new HunkArena(megs * MEBIBYTE, print, options.debug);
   adopt?.(arena);
   arena.clear(host);
   return arena;

@@ -7,6 +7,7 @@ import type { DynamicLight } from "./lighting.ts";
 import type { RefEntity, RefPoly, RefPolyVertex, SceneShader, SourceRefEntity } from "./ref-entity.ts";
 import type { SourceSceneEntities, SourceSceneRange } from "./scene-entities.ts";
 import { SourceSceneSubmissionMemory } from "./scene-submission-memory.ts";
+import type { SourceRendererHardware } from "./settings.ts";
 
 export interface SceneSubmissionLimits {
   readonly maxPolys: number;
@@ -25,6 +26,30 @@ export interface SourceSceneCapture {
   readonly polys: readonly SourceScenePoly[];
   readonly dynamicLights: readonly DynamicLight[];
   transformDlights(origin: Vec3, axis: Axis): readonly DynamicLight[];
+}
+
+export interface SourceSceneCaptureAllocation {
+  readonly entities: SourceSceneEntities;
+  readonly memory: SourceSceneSubmissionMemory;
+  readonly firstPoly: number;
+  readonly firstLight: number;
+  readonly numPolys: number;
+  readonly numLights: number;
+  readonly polyVertices: number;
+}
+
+const captureAllocations = new WeakMap<SourceSceneCapture, SourceSceneCaptureAllocation>();
+
+export function sourceSceneCaptureAllocation(capture: SourceSceneCapture): SourceSceneCaptureAllocation {
+  const allocation = captureAllocations.get(capture);
+  if (allocation === undefined) throw new Error("Source scene capture has no source allocation");
+  allocation.entities.validateRange(capture.entities);
+  allocation.memory.backend.assertLive();
+  return allocation;
+}
+
+export function retainSourceSceneCaptureAllocation(capture: SourceSceneCapture, allocation: SourceSceneCaptureAllocation): void {
+  captureAllocations.set(capture, allocation);
 }
 
 export type SourceSceneSubmissionProfile =
@@ -53,7 +78,8 @@ export class SourceSceneSubmission {
 
   constructor(private readonly entities: SourceSceneEntities, limits: SceneSubmissionLimits,
     private readonly services: SceneSubmissionServices,
-    private readonly profile: SourceSceneSubmissionProfile = { kind: "diagnostic-local" }) {
+    private readonly profile: SourceSceneSubmissionProfile = { kind: "diagnostic-local" },
+    private readonly hardware: SourceRendererHardware = "generic") {
     this.#limits = { ...limits };
     const backend = profile.kind === "source" ? profile.backend : SourceBackendMemory.local(limits);
     if (profile.kind === "source" && entities.backendMemory !== backend)
@@ -126,6 +152,7 @@ export class SourceSceneSubmission {
     });
     const index = this.#numPolys;
     this.#memory.writePoly(index, typeof shader === "number" ? shader : 0, this.#polyVertices, vertices);
+    if (this.hardware === "ragepro") this.#memory.writeFirstVertexWhite(index);
     if (typeof shader === "number") this.#diagnosticShaders.delete(index);
     else this.#diagnosticShaders.set(index, shader);
     this.#numPolys++;
@@ -169,6 +196,7 @@ export class SourceSceneSubmission {
     if (this.#numLights >= 32) return;
     const radius = Math.fround(readRadius());
     if (radius <= 0) return;
+    if (this.hardware === "riva128" || this.hardware === "permedia2") return;
     const sourceOrigin = readOrigin(), origin = vec3(sourceOrigin.x, sourceOrigin.y, sourceOrigin.z);
     const sourceColor = readColor(), color = vec3(sourceColor.x, sourceColor.y, sourceColor.z);
     if (![origin.x, origin.y, origin.z, color.x, color.y, color.z, radius].every(Number.isFinite))
@@ -192,6 +220,9 @@ export class SourceSceneSubmission {
         return Object.freeze(Array.from({ length: numLights }, (_, index) => this.#memory.light(firstLight + index, true)));
       },
     });
+    retainSourceSceneCaptureAllocation(capture, { entities: this.entities, memory: this.#memory,
+      firstPoly: this.#firstScenePoly, firstLight, numPolys: this.#numPolys, numLights: this.#numLights,
+      polyVertices: this.#polyVertices });
     this.#captures.add(capture);
     return capture;
   }

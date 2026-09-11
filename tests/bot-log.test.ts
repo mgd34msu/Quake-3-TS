@@ -226,13 +226,16 @@ describe("source bot library log", () => {
 
   test("captures each real home/product namespace and documents filename host mapping", () => {
     const first = setup("baseq3"), second = setup("missionpack"), third = setup("baseq3");
+    const sourceLogPath = (state: ReturnType<typeof setup>): Buffer => Buffer.concat([
+      Buffer.from(`${state.path("logs")}/`), Buffer.from([0xe9, 0x2e, 0x6c, 0x6f, 0x67]),
+    ]);
     for (const state of [first, second, third]) { state.variables.set("log", "1"); state.log.open("logs\\é.log\0ignored漢"); }
     first.log.write("one"); second.log.write("two"); third.log.write("three");
-    expect(readFileSync(first.path("logs/é.log"), "utf8")).toBe("one");
-    expect(readFileSync(second.path("logs/é.log"), "utf8")).toBe("two");
-    expect(readFileSync(third.path("logs/é.log"), "utf8")).toBe("three");
+    expect(readFileSync(sourceLogPath(first), "utf8")).toBe("one");
+    expect(readFileSync(sourceLogPath(second), "utf8")).toBe("two");
+    expect(readFileSync(sourceLogPath(third), "utf8")).toBe("three");
     first.log.close(); second.log.write("more");
-    expect(readFileSync(second.path("logs/é.log"), "utf8")).toBe("twomore");
+    expect(readFileSync(sourceLogPath(second), "utf8")).toBe("twomore");
     expect(third.log.filePointer()).not.toBeNull();
   });
 

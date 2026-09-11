@@ -6,6 +6,8 @@ import { CommonParseState } from "../../core/common-parse.ts";
 import type { CommandContext } from "../../core/commands.ts";
 import { qvmFloatToInt } from "../../core/numeric.ts";
 import { sourceCommandText } from "../../core/text.ts";
+import { isPrereleaseTeamArenaDemo, RETAIL_PRODUCT_PROFILE } from "../../core/product-profile.ts";
+import type { ProductProfile } from "../../core/product-profile.ts";
 import { keynumToString } from "../../engine/client-keys.ts";
 import type { ClientKeys } from "../../engine/client-keys.ts";
 import type { EngineClientSession } from "../../engine/client-session.ts";
@@ -68,6 +70,7 @@ export function clampTeamArenaUiCvar(minimum: number, maximum: number, value: nu
 export function nonMissionpackOwnerDrawWidth(_ownerDraw: number): number { return 0; }
 
 export interface TeamArenaUiOptions {
+  readonly productProfile?: ProductProfile;
   readonly common: CommonConsole;
   readonly keys: ClientKeys;
   readonly browser: ServerBrowser;
@@ -144,7 +147,8 @@ class TeamArenaUiDisplay {
     this.ownerKeys = new TeamArenaOwnerKeys({ cvars, game, teams, selection: this.selection, feeders: this.feeders,
       settings: this.settings, scores: this.scores, players: this.playerList, catalog: this.catalog, servers: this.servers,
       cinematics: this.cinematics, runtime, interaction, readClient, readRealTime, assertActive: current });
-    this.scripts = new TeamArenaMenuScripts({ cvars, commands: common.commands, keys, cdKey: common.cdKey, usesUniqueKey, game, teams,
+    this.scripts = new TeamArenaMenuScripts({ productProfile: options.productProfile ?? RETAIL_PRODUCT_PROFILE,
+      cvars, commands: common.commands, keys, cdKey: common.cdKey, usesUniqueKey, game, teams,
       catalog: this.catalog, selection: this.selection, lists: this.lists, scores: this.scores, players: this.playerList,
       feeders: this.feeders, browser, servers: this.servers, status: this.status, cinematics: this.cinematics,
       settings: this.settings, ownerKeys: this.ownerKeys, runtime, interaction, readRealTime, print, assertActive: current });
@@ -159,7 +163,8 @@ class TeamArenaUiDisplay {
       sound, newHighScoreSound: () => resources.assets.newHighScoreSound, assertActive: current });
     this.refresher = new TeamArenaUiRefresh({ cvars, runtime, menus: this.menus, resources, browser: this.servers,
       status: this.status, assertActive: current });
-    this.loader = new TeamArenaUiMenuLoader({ scriptSources: () => options.scriptSources(), memory, resources, cvars, runtime,
+    this.loader = new TeamArenaUiMenuLoader({ productProfile: options.productProfile ?? RETAIL_PRODUCT_PROFILE,
+      scriptSources: () => options.scriptSources(), memory, resources, cvars, runtime,
       random: { nextInt: () => random.rand() }, systemClock: options.systemClock, print,
       error: text => { throw new CommonError("drop", text); }, assertCurrentOperation: current });
     this.consoleCommands = new TeamArenaConsoleCommands({ refresh: this.refresher, runtime, memory, loader: this.loader,
@@ -299,9 +304,10 @@ export class TeamArenaUi {
     await this.resources.assetCache(); this.current();
     this.options.systemClock.milliseconds(); this.current();
     this.teams.teamCount = 0; this.teams.characterCount = 0; this.teams.aliasCount = 0;
-    await this.teams.parseTeamInfo("teaminfo.txt"); this.current();
-    await this.teams.loadTeams(); this.current();
-    await this.gameInfo.parseGameInfo("gameinfo.txt"); this.current();
+    const demo = isPrereleaseTeamArenaDemo(this.options.productProfile ?? RETAIL_PRODUCT_PROFILE);
+    await this.teams.parseTeamInfo(demo ? "demoteaminfo.txt" : "teaminfo.txt"); this.current();
+    if (!demo) { await this.teams.loadTeams(); this.current(); }
+    await this.gameInfo.parseGameInfo(demo ? "demogameinfo.txt" : "gameinfo.txt"); this.current();
     const menuSet = sourceCommandText(this.cvars.registry.get("ui_menuFiles")?.value ?? "").slice(0, 1023);
     await this.loader.load(menuSet.length === 0 ? "ui/menus.txt" : menuSet, true); this.current();
     await this.loader.load("ui/ingame.txt", false); this.current();

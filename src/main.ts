@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import { VirtualFileSystem } from "./assets/vfs.ts";
+import { NativeRoot } from "./assets/native-root.ts";
 import { parseBsp } from "./assets/bsp.ts";
 import { add3, angleVectors, anglesToAxis, scale3 } from "./core/math.ts";
 import { createRefdef } from "./render/refdef.ts";
@@ -74,6 +75,7 @@ Options before --:
   --data PATH                 Default retail directory; Q3_DATA or discovery if omitted
   --home PATH                 Required writable server home, separate from retail data
   --cdpath PATH               Optional read-only CD search root
+  --missing-files PATH        Append failed source file opens to this diagnostic log
   --product baseq3|missionpack Default baseq3
   --frames N                  Stop after N common frames, not fixed simulation steps
   --help                      Show this help without initializing the engine
@@ -100,6 +102,7 @@ Options before --:
   --data PATH                 Retail installation; Q3_DATA or discovery if omitted
   --home PATH                 Required writable client home, separate from retail
   --cdpath PATH               Optional read-only CD search root
+  --missing-files PATH        Append failed source file opens to this diagnostic log
   --product baseq3|missionpack Default baseq3; selects the actual product menus/game
   --renderer cpu|gl           TypeScript software or SDL2 OpenGL renderer
   --width N --height N        Window dimensions, default 640x480
@@ -326,6 +329,7 @@ async function dedicatedMain(args: readonly string[]): Promise<void> {
   const { values } = parseArgs({ args: separator < 0 ? args : args.slice(0, separator), options: {
     help: { type: "boolean", short: "h" }, data: { type: "string" }, home: { type: "string" },
     cdpath: { type: "string" }, product: { type: "string", default: "baseq3" }, frames: { type: "string" },
+    "missing-files": { type: "string" },
   } });
   if (values.help === true) { process.stdout.write(serverHelp); return; }
   if (values.home === undefined || values.home.length === 0) throw new Error("--home is required and must be nonempty");
@@ -336,8 +340,9 @@ async function dedicatedMain(args: readonly string[]): Promise<void> {
   // roots in CommonConsole only after the native early startup-variable passes.
   const dataPath = values.data ?? process.env["Q3_DATA"] ?? await discoverDataPath() ?? process.cwd();
   const host = await DedicatedServerHost.open({
-    roots: { dataPath, homePath: values.home, cdPath: values.cdpath ?? null, product: values.product },
-    startupText: separator < 0 ? "" : args.slice(separator + 1).join(" "),
+    roots: { dataPath, homePath: values.home, cdPath: values.cdpath ?? null, product: values.product,
+      ...(values["missing-files"] === undefined ? {} : { missingFileLogPath: values["missing-files"] }) },
+    startupText: separator < 0 ? "" : NativeRoot.fromHost(args.slice(separator + 1).join(" ")).sourceText,
     buildDate: "development",
     print: text => { process.stdout.write(text); },
     bots: { kind: "source" },
@@ -353,6 +358,7 @@ async function clientMain(args: readonly string[]): Promise<void> {
     product: { type: "string", default: "baseq3" }, renderer: { type: "string", default: "cpu" },
     width: { type: "string", default: "640" }, height: { type: "string", default: "480" },
     "sound-rate": { type: "string", default: "48000" }, hidden: { type: "boolean", default: false }, frames: { type: "string" },
+    "missing-files": { type: "string" },
   } });
   if (values.help === true) { process.stdout.write(clientHelp); return; }
   if (values.home === undefined || values.home.length === 0) throw new Error("--home is required and must be nonempty");
@@ -362,8 +368,9 @@ async function clientMain(args: readonly string[]): Promise<void> {
     : { kind: "frames", count: integerOption(values.frames, "frames", 1, 2147483647) };
   const dataPath = values.data ?? process.env["Q3_DATA"] ?? await discoverDataPath() ?? process.cwd();
   const host = await ClientHost.open({
-    roots: { dataPath, homePath: values.home, cdPath: values.cdpath ?? null, product: values.product },
-    startupText: separator < 0 ? "" : args.slice(separator + 1).join(" "), buildDate: "development",
+    roots: { dataPath, homePath: values.home, cdPath: values.cdpath ?? null, product: values.product,
+      ...(values["missing-files"] === undefined ? {} : { missingFileLogPath: values["missing-files"] }) },
+    startupText: separator < 0 ? "" : NativeRoot.fromHost(args.slice(separator + 1).join(" ")).sourceText, buildDate: "development",
     print: text => { process.stdout.write(text); },
     video: { renderer: values.renderer, width: integerOption(values.width, "width", 16, 4096),
       height: integerOption(values.height, "height", 16, 4096), hidden: values.hidden },

@@ -5,6 +5,11 @@
 import { CommonError } from "../core/common-error.ts";
 import type { QvmInterpreter } from "./interpreter.ts";
 
+/** Explicit replacement for selecting the source DEBUG_VM build and debugger controls. */
+export type QvmExecutionProfile =
+  | { readonly kind: "release" }
+  | { readonly kind: "debug"; readonly trace: 0 | 1 | 2; readonly breakFunction: number };
+
 export type VmBinding =
   | { readonly kind: "initializing" }
   | { readonly kind: "interpreted"; readonly interpreter: QvmInterpreter }
@@ -14,6 +19,7 @@ export type VmBinding =
 export interface VmRegistration {
   readonly name: string;
   readonly binding: VmBinding;
+  executionProfile(): QvmExecutionProfile;
   bindData(memory: Uint8Array): void;
   bindInstructionPointersLength(length: number): void;
   bindCodeLength(length: number): void;
@@ -48,7 +54,9 @@ export class VmRegistry {
   private lastCalled: VmRegistration | null = null;
   private debugLevel = 0;
 
-  constructor(private readonly print: (text: string) => void = () => undefined) {}
+  constructor(private readonly print: (text: string) => void = () => undefined,
+    private readonly executionProfile: () => QvmExecutionProfile = () => ({ kind: "release" }),
+  ) {}
 
   debug(level: number): void { this.debugLevel = level; }
 
@@ -73,6 +81,7 @@ export class VmRegistry {
     const registration: VmRegistration = {
       name: sourceName.slice(0, 63),
       get binding(): VmBinding { return cell.registration === registration ? cell.record : { kind: "freed" }; },
+      executionProfile: (): QvmExecutionProfile => { current(); return this.executionProfile(); },
       bindData(memory): void { preparing().dataLength = memory.length; },
       bindInstructionPointersLength(length): void { preparing().instructionPointersLength = length; },
       bindCodeLength(length): void { preparing().codeLength = length; },
@@ -118,7 +127,7 @@ export class VmRegistry {
 
   printProfile(print: (text: string) => void): void {
     const binding = this.lastCalled?.binding;
-    if (binding?.kind === "interpreted") binding.interpreter.symbols.printProfile(print);
+    if (binding?.kind === "interpreted") binding.interpreter.symbols.printProfile(print, binding.interpreter.debugEnabled);
   }
 
   private codeLength(cell: VmSlot): number {

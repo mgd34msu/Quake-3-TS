@@ -80,6 +80,7 @@ export interface CommonServerConstruction {
   readonly random: LinuxNativeRandom;
   readonly dedicated: number;
   assertCurrentOperation(): void;
+  runRendererCallback<T>(callback: () => T): T;
   pumpForDownloadsComplete(): Promise<void>;
   deferCleanup(cleanup: () => void | Promise<void>): void;
 }
@@ -234,6 +235,7 @@ export class CommonFrameDriver {
       try {
         this.serverResource = await this.options.createServer({ common, events: this.events, platform: this.platformResource,
           loopback: this.loopback, random, dedicated, assertCurrentOperation: () => { this.assertCurrentOperation(); },
+          runRendererCallback: callback => this.runRendererCallback(callback),
           pumpForDownloadsComplete: () => this.pumpForDownloadsComplete(),
           deferCleanup: cleanup => {
             this.assertCurrentOperation();
@@ -300,6 +302,23 @@ export class CommonFrameDriver {
     if (operation === undefined || operation.closed || operation !== this.activeOperation || this.phase === "disposed") {
       throw new Error("Common work requires the current owned driver operation");
     }
+  }
+
+  private runRendererCallback<T>(callback: () => T): T {
+    const active = this.activeOperation;
+    // A synchronous source barrier already carries the caller's shutdown scope.
+    if (active !== undefined && !active.closed && this.operationContext.getStore() === active) {
+      this.assertOwnedOperation();
+      return callback();
+    }
+    if (!this.sourceActive()) throw new Error("Renderer callbacks require active common source work");
+    // Worker messages retain their startup async context. Bind each callback to
+    // the current frame, or a finite synchronous operation between frames.
+    if (active !== undefined) return this.operationContext.run(active, callback);
+    const operation: DriverOperation = { closed: false };
+    this.activeOperation = operation;
+    try { return this.operationContext.run(operation, callback); }
+    finally { operation.closed = true; this.activeOperation = undefined; }
   }
 
   private async operation<T>(task: () => Promise<T>): Promise<T> {

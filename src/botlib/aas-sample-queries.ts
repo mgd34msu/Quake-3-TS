@@ -38,14 +38,15 @@ export function aasInsideFace(world: AasWorld | null, face: AasFace, normal: Vec
   return true;
 }
 
-export function aasAreaGroundFace(world: AasWorld | null, areaNumber: number, point: Vec3): AasFace | null {
+export function aasAreaGroundFace(world: AasWorld | null, areaNumber: number, point: Vec3,
+  sampleDebug: ((message: string) => void) | null = null): AasFace | null {
   if (world === null) return null;
   const area = at(world.areas, areaNumber);
   for (let index = 0; index < area.faceCount; index++) {
     const face = at(world.faces, Math.abs(at(world.faceIndexes, area.firstFace + index)));
     if ((face.flags & 4) === 0) continue;
     const normal = at(world.planes, face.plane).normal.z < 0 ? vec3(-0, -0, -1) : vec3(0, 0, 1);
-    if (aasInsideFace(world, face, normal, point, Math.fround(0.01))) return face;
+    if (aasInsideFace(world, face, normal, point, Math.fround(0.01), sampleDebug)) return face;
   }
   return null;
 }
@@ -55,13 +56,14 @@ export function aasFacePlane(world: AasWorld, face: number): AasPlane {
   return { normal: vec3(plane.normal.x, plane.normal.y, plane.normal.z), distance: plane.distance, type: plane.type };
 }
 
-export function aasTraceEndFace(world: AasWorld | null, trace: AasTrace): AasFace | null {
+export function aasTraceEndFace(world: AasWorld | null, trace: AasTrace,
+  sampleDebug: ((message: string) => void) | null = null): AasFace | null {
   if (world === null || trace.startSolid) return null;
   const area = at(world.areas, trace.lastArea);
   for (let index = 0; index < area.faceCount; index++) {
     const face = at(world.faces, Math.abs(at(world.faceIndexes, area.firstFace + index)));
     if ((face.plane & ~1) !== (trace.plane & ~1)) continue;
-    if (aasInsideFace(world, face, at(world.planes, face.plane).normal, trace.end, Math.fround(0.01))) return face;
+    if (aasInsideFace(world, face, at(world.planes, face.plane).normal, trace.end, Math.fround(0.01), sampleDebug)) return face;
   }
   return null;
 }

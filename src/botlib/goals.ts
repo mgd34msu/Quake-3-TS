@@ -196,6 +196,10 @@ export function loadItemConfig(resolver: BotScriptReader, path: string, options:
     preprocessor = new ItemConfigTokens(ScriptSourceReader.open(root, resolver, {
       ...options.preprocessor,
       globals: resolver.globals,
+      ...(resolver.debugEval === undefined ? {} : { debugEval: (text: string) => {
+        try { resolver.debugEval?.(text); }
+        catch (error) { diagnosticCallbackAborted = true; throw error; }
+      } }),
       report: diagnostic => {
         try {
           options.preprocessor?.report?.(diagnostic);
@@ -293,6 +297,7 @@ export interface GoalDiagnostic {
 }
 
 export interface GoalLibraryOptions {
+  readonly debug?: boolean;
   readonly memory?: BotMemory;
   readonly resolver: BotScriptReader;
   readonly weightStore: WeightConfigStore;
@@ -644,6 +649,7 @@ export class BotGoalLibrary {
       }
       const resolver: BotScriptReader = {
         globals: this.options.resolver.globals,
+        debugEval: this.options.resolver.debugEval,
         resolveRoot: filename => {
           const source = this.options.resolver.resolveRoot(filename);
           checkCurrent();
@@ -1094,7 +1100,12 @@ export class BotGoalLibrary {
         this.removeLevelItem(existing); this.freeLevelItem(existing);
       }
       const unlinked = this.findLevelItem(item => item.entity === 0 && this.allowed(item.flags) && item.info.modelIndex === info.modelIndex && length3(sub3(item.origin, info.origin)) < 30);
-      if (unlinked !== undefined) { unlinked.entity = entity; this.moveItem(unlinked, info.origin, navigation); continue; }
+      if (unlinked !== undefined) {
+        unlinked.entity = entity;
+        this.moveItem(unlinked, info.origin, navigation);
+        if (this.options.debug) this.options.log.write(`linked item ${unlinked.info.classname} to an entity`);
+        continue;
+      }
       const itemInfo = config.items.find(item => item.modelIndex === info.modelIndex);
       if (itemInfo === undefined) continue;
       const item = this.allocLevelItem();

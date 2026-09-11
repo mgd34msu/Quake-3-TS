@@ -10,7 +10,10 @@ import {
   opendirSync,
   readdirSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { hostRootInput, NativeRoot } from "./native-root.ts";
+import type { RootInput } from "./native-root.ts";
+import type { MissingFileLog } from "./missing-file-log.ts";
 import type { Dir, Dirent } from "node:fs";
 import { SourceFileHandles } from "./file-handles.ts";
 import type { FileHandle } from "./file-handles.ts";
@@ -62,7 +65,7 @@ type MountedFile = LooseFile | PackedFile;
 
 interface LooseDirectoryMount {
   readonly kind: "loose-directory";
-  readonly root: string;
+  readonly root: NativeRoot;
   readonly game: string;
   readonly directory: string;
   readonly nativeDirectory: Buffer;
@@ -84,6 +87,7 @@ export interface VfsReferenceOptions {
 }
 
 export interface VfsSearchOptions {
+  readonly missingFileLogPath?: string;
   readonly dataPath: string;
   readonly homePath: string;
   readonly cdPath: string | null;
@@ -92,7 +96,21 @@ export interface VfsSearchOptions {
   readonly baseGameDirectory?: string;
 }
 
-export interface VfsTrackedSearchOptions extends VfsSearchOptions {
+/** External VFS entries interpret plain root strings as host Unicode. */
+export interface VfsRootOptions extends Omit<VfsSearchOptions, "dataPath" | "homePath" | "cdPath"> {
+  readonly dataPath: RootInput;
+  readonly homePath: RootInput;
+  readonly cdPath: RootInput | null;
+}
+
+export interface NativeSearchRoots extends Omit<VfsSearchOptions, "dataPath" | "homePath" | "cdPath"> {
+  readonly dataPath: NativeRoot;
+  readonly homePath: NativeRoot;
+  readonly cdPath: NativeRoot | null;
+}
+
+export interface VfsTrackedSearchOptions extends VfsRootOptions {
+  readonly missingFiles?: MissingFileLog;
   readonly references: VfsReferenceOptions;
   readonly startupGame?: "baseq3" | "demota";
   readonly isRestricted?: () => boolean;
@@ -361,11 +379,6 @@ function validateSourceLength(source: VfsSource, size: number): void {
   }
 }
 
-function checkedSearchRoot(path: string, label: string): string {
-  if (path.includes("\0")) throw new RangeError(`${label} contains NUL`);
-  return resolve(path === "" ? "/" : path);
-}
-
 export function checkedGameDirectory(game: string): string {
   if (game === "") return game;
   checkListBytes(game, "Game directory");
@@ -409,7 +422,7 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
   private readonly ownsHandles: boolean;
 
   protected constructor(
-    private readonly searchOptions: VfsSearchOptions,
+    private readonly searchOptions: VfsRootOptions,
     private readonly referenceTracker: PakReferences | null,
     handles?: SourceFileHandles,
     private readonly serverFiles?: ServerFileSystem,
@@ -423,6 +436,7 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
     private readonly startupGame: "baseq3" | "demota" = "baseq3",
     private readonly readCdKeys?: () => void,
     private readonly isFullyInitialized: () => boolean = () => true,
+    private readonly missingFiles?: MissingFileLog,
   ) {
     this.handles = handles ?? new SourceFileHandles();
     this.ownsHandles = handles === undefined;
@@ -433,10 +447,9 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
     this.assertLive();
     if (this.started) throw new Error("Filesystem startup has already been reached");
     this.started = true;
-    const options = this.searchOptions, startupGame = this.startupGame;
-    checkedSearchRoot(options.cdPath ?? "", "CD path");
-    checkedSearchRoot(options.dataPath, "Base path");
-    checkedSearchRoot(options.homePath, "Home path");
+    const inputs = this.searchOptions, startupGame = this.startupGame;
+    const options: NativeSearchRoots = { ...inputs, dataPath: hostRootInput(inputs.dataPath),
+      homePath: hostRootInput(inputs.homePath), cdPath: inputs.cdPath === null ? null : hostRootInput(inputs.cdPath) };
     const games: string[] = [startupGame];
     if (startupGame === "baseq3") {
       const baseGame = checkedGameDirectory(options.baseGameDirectory ?? "");
@@ -445,21 +458,21 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
       if (currentGame !== "" && !pathCaseEqual(currentGame, startupGame)) games.push(currentGame);
     }
     for (const game of games) {
-      const roots: string[] = [];
-      if (options.cdPath !== null && options.cdPath !== "") roots.push(options.cdPath);
-      if (options.dataPath !== "") roots.push(options.dataPath);
+      const roots: NativeRoot[] = [];
+      if (options.cdPath !== null && options.cdPath.sourceText !== "") roots.push(options.cdPath);
+      if (options.dataPath.sourceText !== "") roots.push(options.dataPath);
       // The initial game home test reads fs_basepath; the two mod tests read fs_homepath.
-      if ((game === startupGame ? options.dataPath : options.homePath) !== ""
-        && !pathCaseEqual(options.homePath, options.dataPath)) roots.push(options.homePath);
+      if ((game === startupGame ? options.dataPath : options.homePath).sourceText !== ""
+        && !pathCaseEqual(options.homePath.sourceText, options.dataPath.sourceText)) roots.push(options.homePath);
       for (const root of roots) {
         if (this.searchPaths.some(mounted => mounted.kind === "loose-directory"
-          && pathCaseEqual(mounted.game, game) && pathCaseEqual(mounted.root, root))) continue;
+          && pathCaseEqual(mounted.game, game) && pathCaseEqual(mounted.root.sourceText, root.sourceText))) continue;
         this.assertLive();
         this.mountGameDirectory?.(game);
         this.assertLive();
-        const resolvedRoot = checkedSearchRoot(root, "Search path");
-        const directory = join(resolvedRoot, game);
-        const nativeDirectory = looseOsPath(Buffer.from(resolvedRoot), game);
+        const resolvedRoot = root.resolvedBytes();
+        const directory = join(resolvedRoot.toString("latin1"), game);
+        const nativeDirectory = looseOsPath(resolvedRoot, game);
         this.searchPaths.unshift(Object.freeze({ kind: "loose-directory", root, game, directory, nativeDirectory } satisfies LooseDirectoryMount));
         const entries = await directoryEntries(nativeDirectory);
         this.assertLive();
@@ -519,6 +532,7 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
     }
     this.referenceTracker?.reorderPacks(packs);
     this.searchPaths = orderedPaths;
+    this.missingFiles?.startup();
   }
 
   private assertLive(): void {
@@ -555,7 +569,7 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
 
   [Symbol.dispose](): void { this.close(); }
 
-  static async openInspection(options: VfsSearchOptions): Promise<VirtualFileSystem> {
+  static async openInspection(options: VfsRootOptions): Promise<VirtualFileSystem> {
     return new VirtualFileSystem(options, null).finishOpen();
   }
 
@@ -792,9 +806,9 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
             const cd = this.copyFiles.cvars.get("fs_cdpath");
             const base = this.copyFiles.cvars.get("fs_basepath");
             if (copy === undefined || cd === undefined || base === undefined) throw new Error("Filesystem copy cvars are not initialized");
-            if (copy.integerValue !== 0 && pathCaseEqual(searchPath.root, cd.value)) {
+            if (copy.integerValue !== 0 && pathCaseEqual(searchPath.root.sourceText, cd.value)) {
               this.copyFiles.writable.copyFileFromCd(searchPath.directory, searchPath.game, loosePath,
-                checkedSearchRoot(base.value, "Base path"), searchPath.nativeDirectory);
+                NativeRoot.fromSource(base.value), searchPath.nativeDirectory);
               this.assertActive();
             }
           }
@@ -812,6 +826,7 @@ export class VirtualFileSystem implements SourceFileReader, RetainedFileReader, 
     }
     this.diagnostics?.developerPrint(`Can't find ${path}\n`);
     this.assertActive();
+    this.missingFiles?.record(path);
     return undefined;
   }
 
@@ -953,7 +968,7 @@ export class TrackedVirtualFileSystem extends VirtualFileSystem {
     const references = new PakReferences({ packs: [], checksumFeed: options.references.checksumFeed, random: options.references.random });
     super(options, references, options.handles, options.serverFiles, options.serverPaks, options.configJournal,
       options.copyFiles, options.fileMemory, options.diagnostics, options.isRestricted, options.mountGameDirectory, options.startupGame,
-      options.readCdKeys, options.isFullyInitialized);
+      options.readCdKeys, options.isFullyInitialized, options.missingFiles);
     this.pakReferences = references;
   }
 

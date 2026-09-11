@@ -58,8 +58,15 @@ export class SourceBots {
   readonly aasDebug: AasDebugGeometry;
   private phase: SourceBotsPhase = { kind: "idle" };
 
-  constructor(private readonly common: CommonConsole, random: LinuxNativeRandom) {
+  constructor(private readonly common: CommonConsole, random: LinuxNativeRandom, debugBuild = false) {
     const owner = this;
+    const capability = (name: string): boolean => common.cvars.register(name, "0", CvarFlag.Init).integerValue !== 0;
+    const memoryManager = capability("com_botMemoryManager"), memoryDebug = capability("com_botMemoryDebug");
+    const aasFileDebug = capability("com_botAasFileDebug"), alternativeRouteDebug = capability("com_botAlternativeRouteDebug");
+    const aasSampleDebug = capability("com_botAasSampleDebug"), reachDebug = capability("com_botReachDebug");
+    const weaponDebug = capability("com_botWeaponDebug"), debugEval = capability("com_botDebugEval");
+    const aiMove = capability("com_botAiMoveDebug"), elevator = capability("com_botElevatorDebug");
+    const funcBob = capability("com_botFuncBobDebug"), grapple = capability("com_botGrappleDebug");
     const maxDebugPolys = common.cvars.get("bot_maxdebugpolys");
     if (maxDebugPolys === undefined) throw new Error("Server bot cvars must register before bot library initialization");
     this.debugPolygons.initialize(maxDebugPolys.integerValue);
@@ -68,10 +75,17 @@ export class SourceBots {
       polygonCreate: (color, count, points) => this.debugPolygons.create(color, count, points),
       polygonDelete: handle => { this.debugPolygons.delete(handle); },
       print: (severity, text) => { this.print(severity, text); },
-      debugBuild: false,
+      debugBuild,
       memory: () => this.library.memory,
     });
+    const geometry = { geometry: this.aasDebug, createLine: () => this.debugPolygons.lineCreate(),
+      showLine: this.debugPolygons.lineShow.bind(this.debugPolygons) };
     this.library = new BotLibrary({ assets: () => common.files.current, random,
+      ...(debugBuild ? { debugProfile: { kind: "source-debug", ...geometry } } : {}),
+      ...(memoryDebug ? { memoryProfile: "debug" } : memoryManager ? { memoryProfile: "manager" } : {}),
+      aasFileDebug, aasSampleDebug, reachDebug, weaponDebug, debugEval,
+      ...(alternativeRouteDebug ? { alternativeRouteDebug: this.aasDebug } : {}),
+      ...(aiMove || elevator || funcBob || grapple ? { movementProfile: { ...geometry, aiMove, elevator, funcBob, grapple } } : {}),
       hunk: { kind: "source-hunk", get accounting() { return common.hunk.accounting; } },
       zone: common.mainZone,
       print: (severity, text) => this.print(severity, text), openLog: filename => common.files.writable.openBotLog(filename),

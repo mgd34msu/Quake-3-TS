@@ -33,6 +33,7 @@ export interface ChatDiagnostic {
 }
 export interface BotChatHost extends BotActionHost { readonly random: BotRandom; time(): number; report?(diagnostic: ChatDiagnostic): void }
 export interface BotChatOptions {
+  readonly debug?: { readonly milliseconds: () => number };
   readonly log?: Pick<BotLog, "write" | "filePointer">;
   readonly maxMessages?: number | (() => number);
   readonly synonymFile?: string;
@@ -491,15 +492,19 @@ export class BotChatLibrary {
     };
     const stream = ScriptSourceReader.open(source, {
       resolve: request => chatSourceCallback(() => this.reader.resolve(request), current),
-    }, { globals: this.reader.globals, report });
+    }, { globals: this.reader.globals, report,
+      ...(this.reader.debugEval === undefined ? {} : { debugEval: (text: string) => chatSourceCallback(() => this.reader.debugEval?.(text), current) }),
+    });
     return new ChatDataParser(stream, source.path, memory, this.memory, report);
   }
 
   setup(): void {
+    const startTime = this.options.debug?.milliseconds();
     const generation = this.generation, revision = ++generation.setupRevision;
     const current = (): boolean => this.generation === generation && revision === generation.setupRevision;
     const load = <T>(path: string, parse: (parser: ChatDataParser) => T, publish: (value: T, allocation: BotMemoryAllocation | null) => void,
-      empty: T, passes = 1, finish?: (value: T) => boolean): boolean => {
+      empty: T, passes = 1, finish?: (value: T) => boolean, timed = false): boolean => {
+      const loadStart = timed ? this.options.debug?.milliseconds() : undefined;
       let value = empty;
       let size = 0;
       let allocation: BotMemoryAllocation | null = null;
@@ -534,6 +539,10 @@ export class BotChatLibrary {
         size = storage.byteLength;
       }
       this.report("info", "loaded", `loaded ${path}`, path);
+      if (!current()) return false;
+      if (loadStart !== undefined && this.options.debug !== undefined) {
+        this.report("info", "loaded", `random strings ${(this.options.debug.milliseconds() - loadStart) | 0} msec`, path);
+      }
       if (!current() || (finish !== undefined && !finish(value))) return false;
       publish(value, allocation);
       return true;
@@ -543,7 +552,7 @@ export class BotChatLibrary {
     }, [], 2)) return;
     if (!load(this.options.randomFile ?? "rnd.c", parser => parser.randoms(), (value, allocation) => {
       this.randoms = value; this.randomsAllocation = value.length === 0 ? null : allocation;
-    }, [], 2)) return;
+    }, [], 2, undefined, true)) return;
     if (!load(this.options.matchFile ?? "match.c", parser => parser.matchTemplates(), value => { this.matches = value; }, null)) return;
     const noChat = this.options.noChat?.() ?? false;
     if (!current()) return;
@@ -578,6 +587,9 @@ export class BotChatLibrary {
       previous = cell;
     }
     this.freeConsoleMessages = first;
+    if (startTime !== undefined && this.options.debug !== undefined) {
+      this.report("info", "loaded", `setup chat AI ${(this.options.debug.milliseconds() - startTime) | 0} msec`);
+    }
   }
 
   shutdown(): void {
@@ -674,6 +686,7 @@ export class BotChatLibrary {
     };
     const sourceName: ChatTextSource = typeof name === "string" ? name
       : maximumBytes => chatSourceCallback(() => name(maximumBytes), current);
+    const startTime = this.options.debug?.milliseconds();
     let chat: ChatInitial | null = null, size = 0;
     for (let pass = 0; pass < 2; pass++) {
       const allocation = pass > 0 && size > 0 ? this.memory.allocate(size, "heap", true) : null;
@@ -717,6 +730,10 @@ export class BotChatLibrary {
     if (!current()) return false;
     const developer = this.options.developer?.() ?? false;
     if (developer && current()) this.checkIntegrity(chat.allMessages(), current);
+    if (!current()) return false;
+    if (startTime !== undefined && this.options.debug !== undefined) {
+      this.report("info", "loaded", `initial chats loaded in ${(this.options.debug.milliseconds() - startTime) | 0} msec`);
+    }
     if (!current()) return false;
     state.chat = chat;
     const cache = !(this.options.reloadCharacters?.() ?? false);
@@ -1053,7 +1070,10 @@ export class BotChatLibrary {
     const chat = state.chat; if (chat === null) return;
     let type = chat.firstType;
     while (type !== null && !chatTextEquals(type.name, name)) type = type.next;
-    if (type === null) return;
+    if (type === null) {
+      this.missingInitialChat(name);
+      return;
+    }
     let eligible = 0;
     for (const message of type.messages()) if (message.time <= this.time()) eligible++;
     let selected: ChatMessage | undefined;
@@ -1067,9 +1087,17 @@ export class BotChatLibrary {
         if (--index < 0) { selected = message; selected.time = Math.fround(this.time() + 20); break; }
       }
     }
-    if (selected === undefined) return;
+    if (selected === undefined) {
+      this.missingInitialChat(name);
+      return;
+    }
     const match: RawMatch = { text: "", variables: rawCaptures() }; this.appendVariables(match, variables);
     this.construct(state, selected.text, context, match, 0, false);
+  }
+  private missingInitialChat(name: ChatTextSource | null): void {
+    if (this.options.debug === undefined) return;
+    if (name === null) throw new RangeError("BotInitialChat: DEBUG print reads a null source type string");
+    this.report("info", "test-output", `no chat messages of type ${chatText(name)}`);
   }
   private replyKey(key: ChatReplyKey, state: ChatState, input: ChatTextSource, match: RawMatch): boolean {
     if ((key.flags & 4) !== 0) return stringContains(input, state.name) >= 0;

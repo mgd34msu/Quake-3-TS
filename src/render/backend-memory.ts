@@ -15,7 +15,13 @@ export const SOURCE_BACKEND_RELEASE32 = Object.freeze({
 
 type BackendStorage =
   | { readonly kind: "source-hunk"; readonly allocation: HunkAllocation }
-  | { readonly kind: "local"; readonly bytes: Uint8Array };
+  | { readonly kind: "local"; readonly bytes: Uint8Array; readonly originalByteOffset: number };
+
+export interface SourceBackendSnapshot {
+  readonly limits: SceneSubmissionLimits;
+  readonly originalByteOffset: number;
+  readonly bytes: Uint8Array;
+}
 
 export function sourceBackendByteLength(limits: SceneSubmissionLimits): number {
   if (!Number.isSafeInteger(limits.maxPolys) || limits.maxPolys < 0
@@ -48,19 +54,41 @@ export class SourceBackendMemory {
   readonly #polyVertexViews = new Map<number, DataView>();
   #retired = false;
 
-  private constructor(private readonly storage: BackendStorage, limits: SceneSubmissionLimits) {
+  private constructor(private readonly storage: BackendStorage, limits: SceneSubmissionLimits, initialize = true) {
     this.limits = Object.freeze({ maxPolys: limits.maxPolys, maxPolyVertices: limits.maxPolyVertices });
     this.byteLength = sourceBackendByteLength(this.limits);
     const bytes = this.bytes;
     if (bytes.byteLength !== this.byteLength) throw new RangeError("Renderer backend allocation has the wrong byte length");
-    const data = this.fullData();
-    data.setUint32(SOURCE_BACKEND_RELEASE32.polysPointer, bytes.byteOffset + SOURCE_BACKEND_RELEASE32.byteLength, true);
-    data.setUint32(SOURCE_BACKEND_RELEASE32.polyVerticesPointer, bytes.byteOffset + this.polyVerticesOffset(), true);
+    if (initialize) {
+      const data = this.fullData();
+      data.setUint32(SOURCE_BACKEND_RELEASE32.polysPointer, this.byteOffset + SOURCE_BACKEND_RELEASE32.byteLength, true);
+      data.setUint32(SOURCE_BACKEND_RELEASE32.polyVerticesPointer, this.byteOffset + this.polyVerticesOffset(), true);
+    }
   }
 
   /** Explicit diagnostics own the same layout without charging an unrelated source arena. */
   static local(limits: SceneSubmissionLimits): SourceBackendMemory {
-    return new SourceBackendMemory({ kind: "local", bytes: new Uint8Array(sourceBackendByteLength(limits)) }, limits);
+    return new SourceBackendMemory({ kind: "local", bytes: new Uint8Array(sourceBackendByteLength(limits)), originalByteOffset: 0 }, limits);
+  }
+
+  snapshot(): SourceBackendSnapshot {
+    return { limits: { ...this.limits }, originalByteOffset: this.byteOffset, bytes: this.bytes.slice() };
+  }
+
+  static fromSnapshot(snapshot: SourceBackendSnapshot): SourceBackendMemory {
+    if (!Number.isSafeInteger(snapshot.originalByteOffset) || snapshot.originalByteOffset < 0
+      || snapshot.originalByteOffset % 4 !== 0 || snapshot.originalByteOffset + snapshot.bytes.length > 0x100000000)
+      throw new RangeError("Renderer backend snapshot has an invalid release32 pointer base");
+    return new SourceBackendMemory({ kind: "local", bytes: snapshot.bytes.slice(),
+      originalByteOffset: snapshot.originalByteOffset }, snapshot.limits, false);
+  }
+
+  /** Synchronization updates the existing allocation so retained cell views keep identity. */
+  restoreSnapshot(snapshot: SourceBackendSnapshot): void {
+    if (snapshot.originalByteOffset !== this.byteOffset || snapshot.bytes.length !== this.byteLength
+      || snapshot.limits.maxPolys !== this.limits.maxPolys || snapshot.limits.maxPolyVertices !== this.limits.maxPolyVertices)
+      throw new RangeError("Renderer backend snapshot belongs to another allocation layout");
+    this.bytes.set(snapshot.bytes);
   }
 
   /** R_Init supplies a freshly zeroed permanent Hunk_Alloc result. */
@@ -70,7 +98,7 @@ export class SourceBackendMemory {
   }
 
   get byteOffset(): number {
-    return this.storage.kind === "source-hunk" ? this.storage.allocation.byteOffset : this.storage.bytes.byteOffset;
+    return this.storage.kind === "source-hunk" ? this.storage.allocation.byteOffset : this.storage.originalByteOffset;
   }
 
   /** Raw borrows have the same lifetime restriction as HunkAllocation.bytes. */
@@ -129,7 +157,7 @@ export class SourceBackendMemory {
   }
 
   private arrayPointer(field: number, start: number, end: number, stride: number): number {
-    const data = this.fullData(), pointer = data.getUint32(field, true), offset = pointer - data.byteOffset;
+    const data = this.fullData(), pointer = data.getUint32(field, true), offset = pointer - this.byteOffset;
     if (offset < start || offset > end || (offset - start) % stride !== 0) {
       throw new RangeError("Renderer backend array pointer is outside its allocation");
     }
@@ -156,9 +184,10 @@ export class SourceBackendMemory {
     return this.byteOffset + offset;
   }
 
-  /** Pointer words address actual bytes in the backing buffer, never detached record IDs. */
+  /** Source pointer words resolve against the allocation's preserved release32 base. */
   resolvePolyVertexPointer(pointer: number): number {
-    const bytes = this.bytes, offset = pointer - bytes.byteOffset - this.polyVerticesOffset();
+    this.assertLive();
+    const offset = pointer - this.byteOffset - this.polyVerticesOffset();
     if (!Number.isInteger(pointer) || offset < 0 || offset % SOURCE_BACKEND_RELEASE32.polyVertexBytes !== 0
       || offset + SOURCE_BACKEND_RELEASE32.polyVertexBytes > this.limits.maxPolyVertices * SOURCE_BACKEND_RELEASE32.polyVertexBytes) {
       throw new RangeError("Renderer backend polygon vertex pointer is outside its allocation");

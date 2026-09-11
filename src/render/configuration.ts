@@ -3,7 +3,9 @@
 import type { SdlGammaCapability, SdlGammaLease, SdlWindow } from "../platform/sdl.ts";
 import type { SoftwareRenderer } from "./cpu/rasterizer.ts";
 import type { GlRenderer } from "./gl/renderer.ts";
-import type { SourceRendererSettings } from "./settings.ts";
+import type { ThreadedGlRenderer, ThreadedSoftwareRenderer } from "./threaded-backend-proxy.ts";
+import { ThreadedRendererBackend } from "./threaded-backend-proxy.ts";
+import type { SourceRendererDriver, SourceRendererHardware, SourceRendererSettings } from "./settings.ts";
 import type { RenderCommandBuffer } from "./commands.ts";
 import { createImageColorMappings, imageColorLighting } from "./image-upload.ts";
 import type { ImageColorLighting, ImageColorMappings, ImageUploadProfile } from "./image-upload.ts";
@@ -12,8 +14,8 @@ import type { CvarRegistry } from "../core/cvar.ts";
 import { CommonError } from "../core/common-error.ts";
 
 export type ConfiguredRenderer =
-  | { readonly kind: "cpu"; readonly backend: SoftwareRenderer }
-  | { readonly kind: "gl"; readonly backend: GlRenderer };
+  | { readonly kind: "cpu"; readonly backend: SoftwareRenderer | ThreadedSoftwareRenderer }
+  | { readonly kind: "gl"; readonly backend: GlRenderer | ThreadedGlRenderer };
 
 interface ConfigurationFields {
   readonly rendererString: string;
@@ -24,7 +26,7 @@ interface ConfigurationFields {
   readonly colorBits: number;
   readonly depthBits: number;
   readonly stencilBits: number;
-  readonly hardwareType: "generic";
+  readonly hardwareType: SourceRendererHardware;
   readonly deviceSupportsGamma: boolean;
   readonly gamma: SdlGammaCapability;
   readonly textureCompression: "none" | "s3tc";
@@ -36,12 +38,12 @@ interface ConfigurationFields {
   readonly displayFrequency: number;
   readonly isFullscreen: boolean;
   readonly stereoEnabled: boolean;
-  readonly smpActive: false;
+  readonly smpActive: boolean;
 }
 
 export type RendererConfigurationSnapshot = ConfigurationFields & (
-  | { readonly backend: "cpu"; readonly driverType: "cpu"; readonly maxTextureSize: null; readonly depthStorage: "binary64" }
-  | { readonly backend: "gl"; readonly driverType: "icd"; readonly maxTextureSize: number; readonly depthStorage: "driver" }
+  | { readonly backend: "cpu"; readonly driverType: "cpu" | "standalone" | "voodoo"; readonly maxTextureSize: null; readonly depthStorage: "binary64" }
+  | { readonly backend: "gl"; readonly driverType: SourceRendererDriver; readonly maxTextureSize: number; readonly depthStorage: "driver" }
 );
 
 export interface RendererConfigurationOptions {
@@ -112,7 +114,10 @@ export function printRendererGfxInfo(cvars: CvarRegistry, source: {
   emit(`compiled vertex arrays: ${source.configuration().compiledVertexArrays ? "enabled" : "disabled"}\n`);
   emit(`texenv add: ${source.configuration().textureEnvAddAvailable ? "enabled" : "disabled"}\n`);
   emit(`compressed textures: ${source.configuration().textureCompression === "s3tc" ? "enabled" : "disabled"}\n`);
-  if (cvar("r_vertexLight").integerValue !== 0) emit("HACK: using vertex lightmap approximation\n");
+  if (cvar("r_vertexLight").integerValue !== 0 || source.configuration().hardwareType === "permedia2")
+    emit("HACK: using vertex lightmap approximation\n");
+  if (source.configuration().hardwareType === "ragepro") emit("HACK: ragePro approximations\n");
+  if (source.configuration().hardwareType === "riva128") emit("HACK: riva128 approximations\n");
   if (cvar("r_finish").integerValue !== 0) emit("Forcing glFinish\n");
 }
 
@@ -168,7 +173,7 @@ export class RendererConfiguration {
     this.requireOpen();
     const { renderer, settings } = this.options;
     const textureMode = (): undefined => {
-      if (!renderer.backend.images.setTextureMode(settings.textureMode.value)) settings.warnBadTextureMode();
+      if (!renderer.backend.images.setTextureMode(settings.textureMode.value, settings.textureModeProfile())) settings.warnBadTextureMode();
       this.requireOpen();
     };
     if (renderer.kind === "gl") {
@@ -208,18 +213,18 @@ export class RendererConfiguration {
       colorBits: renderer.kind === "gl" ? renderer.backend.colorBits : renderer.backend.configuration.colorBits,
       depthBits: renderer.kind === "gl" ? renderer.backend.depthBits : renderer.backend.configuration.depthBits,
       stencilBits: renderer.kind === "gl" ? renderer.backend.stencilBits : renderer.backend.configuration.stencilBits,
-      // Both current frontends use the generic shader-finishing profile.
-      hardwareType: "generic", deviceSupportsGamma: gamma.kind === "api-accepted", gamma,
+      hardwareType: settings.hardwareType, deviceSupportsGamma: gamma.kind === "api-accepted", gamma,
       textureCompression: renderer.kind === "gl" ? renderer.backend.textureCompression : "none", textureEnvAddAvailable: settings.textureEnvAddAvailable,
       compiledVertexArrays: renderer.kind === "gl" && renderer.backend.compiledVertexArrays,
       vidWidth: size.width, vidHeight: size.height, windowAspect: this.options.windowAspect ?? Math.fround(size.width / size.height),
       displayFrequency: display.refreshRate, isFullscreen: (window.flags & 1) !== 0,
       stereoEnabled: renderer.kind === "gl" ? renderer.backend.stereoEnabled : renderer.backend.configuration.stereoEnabled,
-      smpActive: false,
+      smpActive: renderer.backend instanceof ThreadedRendererBackend,
     };
     return renderer.kind === "cpu"
-      ? { ...configuration, backend: "cpu", driverType: "cpu", maxTextureSize: null, depthStorage: "binary64" }
-      : { ...configuration, backend: "gl", driverType: "icd", maxTextureSize: renderer.backend.maxTextureSize, depthStorage: "driver" };
+      ? { ...configuration, backend: "cpu", driverType: settings.driverType === "icd" ? "cpu" : settings.driverType,
+        maxTextureSize: null, depthStorage: "binary64" }
+      : { ...configuration, backend: "gl", driverType: settings.driverType, maxTextureSize: renderer.backend.maxTextureSize, depthStorage: "driver" };
   }
 
   imageUploadProfile(): ImageUploadProfile {
@@ -266,7 +271,8 @@ export class RendererConfiguration {
     this.gamma.synchronize();
     if (this.options.settings.textureMode.modified) {
       commands.submit();
-      if (!this.options.renderer.backend.images.setTextureMode(this.options.settings.textureMode.value)) this.options.settings.warnBadTextureMode();
+      if (!this.options.renderer.backend.images.setTextureMode(this.options.settings.textureMode.value, this.options.settings.textureModeProfile()))
+        this.options.settings.warnBadTextureMode();
       this.options.settings.clearTextureModeModified();
     }
     if (this.options.settings.takeGammaModified()) {

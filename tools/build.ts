@@ -12,7 +12,8 @@ if (await policy.exited !== 0) process.exit(1);
 const buildPath = join(snapshotPath, "dist/quake3-ts");
 await mkdir(join(snapshotPath, "dist"), { recursive: true });
 const result = await Bun.build({
-  entrypoints: [join(snapshotPath, "src/main.ts"), join(snapshotPath, "src/render/cpu/triangle-worker.ts")],
+  entrypoints: [join(snapshotPath, "src/main.ts"), join(snapshotPath, "src/render/cpu/triangle-worker.ts"),
+    join(snapshotPath, "src/render/threaded-backend-worker.ts")],
   target: "bun",
   naming: { entry: "[name].ts" },
   compile: { outfile: buildPath },
@@ -30,7 +31,7 @@ const binarySha256 = Bun.CryptoHasher.hash("sha256", await Bun.file(buildPath).b
 // Bun 1.3.14 also writes redundant companions for compiled inline maps.
 // Archive them away from the published executable, whose debug maps are embedded.
 const companions: { readonly archivedCompanion: string; readonly sha256: string }[] = [];
-for (const mapName of ["main.ts.map", "triangle-worker.ts.map"]) {
+for (const mapName of ["main.ts.map", "triangle-worker.ts.map", "threaded-backend-worker.ts.map"]) {
   const generatedMap = join(snapshotPath, "dist", mapName);
   const archivedMap = join(snapshotPath, ".artifacts", `build-${mapName}`);
   if (await Bun.file(generatedMap).exists()) {

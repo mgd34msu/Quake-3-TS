@@ -174,18 +174,24 @@ function isDynamicImplementation(symbol: ts.Symbol | undefined): boolean {
     && (symbol?.declarations?.some((declaration) => declaration.getSourceFile().isDeclarationFile) ?? false);
 }
 
-function platformLibrary(node: ts.Expression | undefined): "sdl" | "gl" | "unix" | undefined {
+function platformLibrary(node: ts.Expression | undefined): "sdl" | "gl" | "unix" | "freetype" | undefined {
   if (node === undefined) return undefined;
   if (ts.isStringLiteralLike(node)) {
     if (["libSDL2-2.0.so.0", "libSDL2.so", "libSDL2.dylib", "libSDL2-2.0.0.dylib", "SDL2.dll"].includes(node.text)) return "sdl";
     if (["libGL.so", "libGL.so.1", "opengl32.dll", "/System/Library/Frameworks/OpenGL.framework/OpenGL"].includes(node.text)) return "gl";
     if (node.text === "libc.so.6") return "unix";
+    if (node.text === "libfreetype.so.6") return "freetype";
   }
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
     && ts.isElementAccessExpression(node.left) && ts.isStringLiteralLike(node.left.argumentExpression)
     && node.left.argumentExpression.text === "QUAKE_SDL2_LIBRARY" && ts.isPropertyAccessExpression(node.left.expression)
     && node.left.expression.name.text === "env" && ts.isIdentifier(node.left.expression.expression)
     && node.left.expression.expression.text === "process" && platformLibrary(node.right) === "sdl") return "sdl";
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+    && ts.isElementAccessExpression(node.left) && ts.isStringLiteralLike(node.left.argumentExpression)
+    && node.left.argumentExpression.text === "QUAKE_FREETYPE_LIBRARY" && ts.isPropertyAccessExpression(node.left.expression)
+    && node.left.expression.name.text === "env" && ts.isIdentifier(node.left.expression.expression)
+    && node.left.expression.expression.text === "process" && platformLibrary(node.right) === "freetype") return "freetype";
   return undefined;
 }
 
@@ -248,7 +254,8 @@ export function auditProgram(program: ts.Program, projectFiles: readonly string[
       if (name !== "dlopen" && name !== "linkSymbols") return;
       if (!platform) report(node, "ffi-boundary", "Only src/platform modules may call FFI loaders, including re-exported loaders.");
       const library = name === "dlopen" ? platformLibrary(node.arguments[0]) : "gl";
-      if (library === undefined) report(node, "ffi-library", "FFI may load only named system SDL2/OpenGL libraries or approved libc platform services, with the existing QUAKE_SDL2_LIBRARY override.");
+      if (library === undefined || library === "freetype" && projectPath !== "src/platform/freetype.ts")
+        report(node, "ffi-library", "FFI may load only named system SDL2/OpenGL libraries or approved libc and FreeType platform services.");
       const descriptors = node.arguments[name === "dlopen" ? 1 : 0];
       if (descriptors === undefined || !ts.isObjectLiteralExpression(descriptors)) {
         report(node, "ffi-symbol", "FFI requires a visible object of system platform symbol descriptors.");
@@ -259,7 +266,11 @@ export function auditProgram(program: ts.Program, projectFiles: readonly string[
         const text = key !== undefined && (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) ? key.text : undefined;
         if (!ts.isPropertyAssignment(property) || text === undefined
           || !(library === "sdl" ? /^SDL_/.test(text) && !["SDL_LoadObject", "SDL_LoadFunction", "SDL_UnloadObject"].includes(text)
-            : library === "unix" ? ["tcgetattr", "tcsetattr", "sigaction", "localtime_r", "tzset", "_exit"].includes(text) : library === "gl" && /^gl[A-Z]/.test(text))) {
+            : library === "unix" ? ["tcgetattr", "tcsetattr", "sigaction", "localtime_r", "tzset", "_exit"].includes(text)
+              || projectPath === "src/platform/freetype.ts" && text === "memcpy"
+              : library === "freetype" ? ["FT_Init_FreeType", "FT_Done_FreeType", "FT_New_Memory_Face", "FT_Done_Face",
+                "FT_Set_Char_Size", "FT_Get_Char_Index", "FT_Load_Glyph", "FT_Outline_Translate", "FT_Outline_Get_Bitmap"].includes(text)
+                : library === "gl" && /^gl[A-Z]/.test(text))) {
           report(property, "ffi-symbol", "FFI symbols must belong to the selected SDL2/OpenGL API or the explicit Unix platform allowlist; native module loading and opaque descriptors are forbidden.");
         }
       }

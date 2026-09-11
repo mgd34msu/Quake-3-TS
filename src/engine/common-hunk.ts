@@ -34,6 +34,7 @@ export class CommonHunk {
   constructor(private readonly build: "client" | "dedicated", private readonly cvars: CvarRegistry,
     private readonly print: (text: string) => void,
     private readonly vm: VmRegistry,
+    private readonly writeDebugLog: (text: string) => void = () => {},
   ) {}
 
   get arena(): HunkArena | null { return this.state.kind === "allocated" ? this.state.accounting.arena : null; }
@@ -49,7 +50,9 @@ export class CommonHunk {
     if (this.client !== null || this.server !== null) throw new Error("Common hunk initialization requires unstarted module owners");
     if (filesystemLoadStack !== 0) throw new CommonError("fatal", "Hunk initialization failed. File system load stack not zero");
     const megs = this.cvars.register("com_hunkMegs", "56", CvarFlag.Latch | CvarFlag.Archive).integerValue;
-    initializeHunk({ megs, dedicated, filesystemLoadStack }, this.print, null, arena => {
+    const debug = (this.cvars.get("com_hunkDebug")?.integerValue ?? 0) !== 0;
+    initializeHunk({ megs, dedicated, filesystemLoadStack,
+      ...(debug ? { debug: { writeLog: this.writeDebugLog } } : {}) }, this.print, null, arena => {
       this.state = { kind: "allocated", accounting: new SourceHunkAccounting(arena) };
     });
   }

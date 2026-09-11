@@ -17,11 +17,14 @@ import { SOURCE_PRODUCT_ID } from "./product-id-fixture.ts";
 import { CommonError } from "../src/core/common-error.ts";
 import { vec3 } from "../src/core/math.ts";
 import type { Axis } from "../src/core/math.ts";
+import { CvarFlag } from "../src/core/cvar.ts";
+import { SdlAudioDevice } from "../src/platform/audio.ts";
 
 if (process.env["QUAKE_ENGINE_SOUND_CHILD"] !== "1") {
   test("engine sound commands with retail PCM and actual SDL output", async () => {
     const child = Bun.spawn([process.execPath, "test", fileURLToPath(import.meta.url)], {
-      env: { ...process.env, SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_ENGINE_SOUND_CHILD: "1" },
+      env: { ...process.env, DISPLAY: undefined, WAYLAND_DISPLAY: undefined,
+        SDL_AUDIODRIVER: "dummy", SDL_AUDIO_FREQUENCY: "48000", QUAKE_ENGINE_SOUND_CHILD: "1" },
       stdout: "pipe", stderr: "pipe",
     });
     const [exitCode, stdout, stderr] = await Promise.all([
@@ -31,6 +34,114 @@ if (process.env["QUAKE_ENGINE_SOUND_CHILD"] !== "1") {
     expect(exitCode).toBe(0);
   }, 15000);
 } else {
+  test("unsupported output-rate accounting leaves startup retryable without changing the selected rate", async () => {
+    const homePath = await mkdtemp(join(tmpdir(), "quake3-unavailable-sound-rate-"));
+    const printed: string[] = [];
+    const io = new UnixIo(() => undefined, new UnixSystemClock(), { signals: "none" });
+    const events = new CommonEvents(new DedicatedEventSource(io), () => undefined);
+    const common = await CommonConsole.open({
+      roots: { dataPath: process.env["Q3_DATA"] ?? "/home/buzzkill/Projects/qfiles/q3a", homePath, cdPath: null, product: "baseq3" },
+      startup: new StartupCommands("+set sndspeed 22050"), random: new LinuxNativeRandom(1), build: { kind: "dedicated" },
+      platformPrint: text => { printed.push(text); }, resolveCommand: () => undefined,
+      assertCommandEntry: () => undefined, assertOwnerEntry: () => undefined,
+    }, () => undefined);
+    const sound = new EngineSound(common, events);
+    try {
+      for (const rate of [22050, 11025]) {
+        common.cvars.set("sndspeed", String(rate));
+        printed.length = 0;
+        expect(() => sound.initialize({ sampleRate: 48000, bufferFrames: 256 })).not.toThrow();
+        expect(common.cvars.get("sndspeed")?.value).toBe(String(rate));
+        if (sound.started) {
+          // Native SDL2 can provide exact queues here; sdl2-compat's resampling
+          // profile rejects these rates with the child's fixed 48000 Hz driver.
+          expect(sound.mixer?.outputRate).toBe(rate);
+          sound.shutdown();
+        } else {
+          expect(common.sound.mixer).toBeNull();
+          expect(printed.some(text => text.includes("cannot report exact queued input frames at this sample rate"))).toBe(true);
+        }
+        common.cvars.set("sndspeed", "48000");
+        sound.initialize({ sampleRate: 22050, bufferFrames: 256 });
+        expect(sound.started).toBe(true);
+        expect(sound.mixer?.outputRate).toBe(48000);
+        common.sound.pause();
+        common.sound.submit(5);
+        expect(common.sound.queuedFrames).toBe(5);
+        sound.shutdown();
+        expect(common.sound.mixer).toBeNull();
+      }
+    } finally {
+      try { sound.close(); } finally {
+        try { common.close(); } finally { io.close(); await rm(homePath, { recursive: true, force: true }); }
+      }
+    }
+  });
+
+  test("archived Linux output cvars select actual SDL format, rate and device across sound restart", async () => {
+    const homePath = await mkdtemp(join(tmpdir(), "quake3-selected-sound-"));
+    const printed: string[] = [];
+    const io = new UnixIo(() => undefined, new UnixSystemClock(), { signals: "none" });
+    const events = new CommonEvents(new DedicatedEventSource(io), () => undefined);
+    const common = await CommonConsole.open({
+      roots: { dataPath: process.env["Q3_DATA"] ?? "/home/buzzkill/Projects/qfiles/q3a", homePath, cdPath: null, product: "baseq3" },
+      startup: new StartupCommands("+set sndbits 8 +set sndchannels 1 +set sndspeed 48000 +set s_khz 11"),
+      random: new LinuxNativeRandom(1), build: { kind: "dedicated" }, platformPrint: text => { printed.push(text); },
+      resolveCommand: () => undefined, assertCommandEntry: () => undefined, assertOwnerEntry: () => undefined,
+    }, () => undefined);
+    const sound = new EngineSound(common, events);
+    try {
+      const deviceName = SdlAudioDevice.outputDeviceNames()[0];
+      if (deviceName === undefined) throw new Error("Missing dummy output device");
+      common.cvars.set("snddevice", deviceName);
+      sound.initialize({ sampleRate: 22050, bufferFrames: 256 });
+      common.sound.pause();
+      expect(sound.started).toBe(true);
+      expect(sound.mixer?.outputRate).toBe(48000);
+      expect(sound.mixer?.outputChannels).toBe(1);
+      expect(common.sound.sampleBits).toBe(8);
+      expect(common.sound.channels).toBe(1);
+      expect(common.sound.deviceName).toBe(deviceName);
+      expect(common.cvars.get("s_khz")?.value).toBe("11");
+      for (const name of ["sndbits", "sndspeed", "sndchannels", "snddevice"]) {
+        const cvar = common.cvars.get(name);
+        if (cvar === undefined) throw new Error(`Missing source output cvar ${name}`);
+        expect(cvar.flags & CvarFlag.Archive).toBe(CvarFlag.Archive);
+      }
+      expect(printed.some(text => text.includes("SDL2 queued U8 mono: 48000 Hz"))).toBe(true);
+      common.sound.submit(4);
+      expect(common.sound.queuedFrames).toBe(4);
+      expect(common.sound.pendingOutput.samples).toEqual(new Uint8Array(4).fill(128));
+      common.cvars.set("sndbits", "24");
+      common.cvars.set("sndchannels", "7");
+      common.cvars.set("sndspeed", "0");
+      common.cvars.set("snddevice", "");
+      expect(common.sound.sampleBits).toBe(8);
+      expect(common.sound.channels).toBe(1);
+      sound.shutdown();
+      sound.initialize({ sampleRate: 48000, bufferFrames: 256 });
+      common.sound.pause();
+      expect(sound.started).toBe(true);
+      expect(common.sound.sampleBits).toBe(16);
+      expect(common.sound.channels).toBe(2);
+      expect(common.sound.deviceName).toBeNull();
+      expect(sound.mixer?.outputRate).toBe(48000);
+      sound.shutdown();
+      common.cvars.set("snddevice", "quake3-missing-dummy-output");
+      sound.initialize({ sampleRate: 48000 });
+      expect(sound.started).toBe(false);
+      expect(common.sound.mixer).toBeNull();
+      common.cvars.set("snddevice", deviceName);
+      sound.initialize({ sampleRate: 48000 });
+      expect(sound.started).toBe(true);
+      expect(common.sound.deviceName).toBe(deviceName);
+    } finally {
+      try { sound.close(); } finally {
+        try { common.close(); } finally { io.close(); await rm(homePath, { recursive: true, force: true }); }
+      }
+    }
+  });
+
   test("actual sound owner records source whole-file reads and replays bytes, misses and registration retirement", async () => {
     const root = await mkdtemp(join(tmpdir(), "quake3-source-sound-journal-"));
     const dataPath = join(root, "data"), homePath = join(root, "home"), game = join(homePath, "baseq3");

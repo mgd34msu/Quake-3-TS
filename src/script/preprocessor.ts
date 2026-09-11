@@ -77,6 +77,8 @@ export interface ScriptPreprocessorOptions {
   readonly maxDefines?: number;
   readonly maxExpressionTokens?: number;
   readonly report?: (diagnostic: ScriptDiagnostic) => void;
+  /** Opt-in l_precomp.c DEBUG_EVAL Log_Write output, one call per line. */
+  readonly debugEval?: (text: string) => void;
 }
 
 type BuiltinName = "__LINE__" | "__FILE__" | "__DATE__" | "__TIME__";
@@ -213,7 +215,7 @@ function frozenLocation(location: SourceLocation): SourceLocation {
 }
 
 /** l_precomp.c sprintf("%1.2f", fabs(value)), binary64 and nearest-even. */
-function evaluationDecimal(magnitude: number): string {
+function evaluationDecimal(magnitude: number, precision = 2): string {
   const binary = new DataView(new ArrayBuffer(8));
   binary.setFloat64(0, magnitude, true);
   const bits = binary.getBigUint64(0, true);
@@ -222,14 +224,21 @@ function evaluationDecimal(magnitude: number): string {
   if (exponent === 0x7ff) return fraction === 0n ? "inf" : "nan";
   const significand = exponent === 0 ? fraction : fraction | 0x10000000000000n;
   const shift = exponent === 0 ? -1074 : exponent - 1075;
-  const scaled = significand * 100n;
+  const scale = 10n ** BigInt(precision);
+  const scaled = significand * scale;
   let rounded: bigint;
   if (shift >= 0) rounded = scaled << BigInt(shift);
   else {
     const divisor = 1n << BigInt(-shift), lower = scaled / divisor, remainder = scaled % divisor;
     rounded = remainder * 2n > divisor || remainder * 2n === divisor && lower % 2n !== 0n ? lower + 1n : lower;
   }
-  return `${rounded / 100n}.${String(rounded % 100n).padStart(2, "0")}`;
+  return `${rounded / scale}.${String(rounded % scale).padStart(precision, "0")}`;
+}
+
+function debugEvaluationValue(value: EvalValue, integerMode: boolean): string {
+  if (integerMode) return String(value.integerValue);
+  const number = value.floatValue;
+  return `${number < 0 || Object.is(number, -0) ? "-" : ""}${evaluationDecimal(Math.abs(number), 6)}`;
 }
 
 function makeNumber(text: string, value: number, flags: number, location: SourceLocation): NumberToken {
@@ -280,6 +289,8 @@ class ExpressionParser {
     fail: ExpressionFailure,
     fallbackLocation: SourceLocation,
     private readonly report: (message: string, location: SourceLocation) => void,
+    private readonly debugEval: ((text: string) => void) | undefined,
+    private readonly isSourceFailure: (error: unknown) => boolean,
   ) {
     this.tokens = tokens;
     this.integerMode = integerMode;
@@ -360,28 +371,40 @@ class ExpressionParser {
       }
       if (value === null) throw new RangeError("source expression reduction dereferences a missing value");
       const op = operator.token.punctuation;
-      if (op === Punctuation.LogicalNot) value.value = { integerValue: Number(value.value.integerValue === 0), floatValue: Number(value.value.floatValue === 0) };
-      else if (op === Punctuation.BinaryNot) value.value = { integerValue: ~value.value.integerValue, floatValue: value.value.floatValue };
-      else {
-        const next = value.next;
-        if (op === Punctuation.Question) {
-          if (question !== null) this.fail("? after ? in #if/#elif", operator.token.location);
-          question = value.value;
-        } else {
-          if (next === null) throw new RangeError("source expression binary reduction dereferences a missing value");
-          if (op === Punctuation.Colon) {
-            if (question === null) this.fail(": without ? in #if/#elif", operator.token.location);
-            value.value = this.integerMode
-              ? { integerValue: question.integerValue === 0 ? next.value.integerValue : value.value.integerValue, floatValue: value.value.floatValue }
-              : { integerValue: value.value.integerValue, floatValue: question.floatValue === 0 ? next.value.floatValue : value.value.floatValue };
-            question = null;
-          } else if (op !== Punctuation.Increment && op !== Punctuation.Decrement) value.value = this.binary(operator.token, value.value, next.value);
-        }
-        const removed = op === Punctuation.Question ? value : next;
-        if (removed === null) throw new RangeError("source expression removes a missing value");
-        if (removed.previous === null) values.first = removed.next; else removed.previous.next = removed.next;
-        if (removed.next === null) values.last = removed.previous; else removed.next.previous = removed.previous;
+      if (this.debugEval !== undefined) {
+        this.debugEval(`operator ${operator.token.text}, value1 = ${debugEvaluationValue(value.value, this.integerMode)}`);
+        if (value.next !== null) this.debugEval(`value2 = ${debugEvaluationValue(value.next.value, this.integerMode)}`);
       }
+      try {
+        if (op === Punctuation.LogicalNot) value.value = { integerValue: Number(value.value.integerValue === 0), floatValue: Number(value.value.floatValue === 0) };
+        else if (op === Punctuation.BinaryNot) value.value = { integerValue: ~value.value.integerValue, floatValue: value.value.floatValue };
+        else {
+          const next = value.next;
+          if (op === Punctuation.Question) {
+            if (question !== null) this.fail("? after ? in #if/#elif", operator.token.location);
+            question = value.value;
+          } else {
+            if (next === null) throw new RangeError("source expression binary reduction dereferences a missing value");
+            if (op === Punctuation.Colon) {
+              if (question === null) this.fail(": without ? in #if/#elif", operator.token.location);
+              value.value = this.integerMode
+                ? { integerValue: question.integerValue === 0 ? next.value.integerValue : value.value.integerValue, floatValue: value.value.floatValue }
+                : { integerValue: value.value.integerValue, floatValue: question.floatValue === 0 ? next.value.floatValue : value.value.floatValue };
+              question = null;
+            } else if (op !== Punctuation.Increment && op !== Punctuation.Decrement) value.value = this.binary(operator.token, value.value, next.value);
+          }
+          const removed = op === Punctuation.Question ? value : next;
+          if (removed === null) throw new RangeError("source expression removes a missing value");
+          if (removed.previous === null) values.first = removed.next; else removed.previous.next = removed.next;
+          if (removed.next === null) values.last = removed.previous; else removed.next.previous = removed.previous;
+        }
+      } catch (error) {
+        if (this.isSourceFailure(error) && this.debugEval !== undefined) {
+          this.debugEval(`result value = ${debugEvaluationValue(value.value, this.integerMode)}`);
+        }
+        throw error;
+      }
+      if (this.debugEval !== undefined) this.debugEval(`result value = ${debugEvaluationValue(value.value, this.integerMode)}`);
       if (operator.previous === null) operators.first = operator.next; else operator.previous.next = operator.next;
       if (operator.next === null) operators.last = operator.previous; else operator.next.previous = operator.previous;
     }
@@ -557,6 +580,7 @@ class PreprocessorEngine {
   private readonly limits: Limits;
   private readonly now: () => Date;
   private readonly report: ((diagnostic: ScriptDiagnostic) => void) | undefined;
+  private readonly debugEval: ((text: string) => void) | undefined;
   private readonly memory: ScriptMemory | undefined;
   private readonly reported: ScriptDiagnostic[] = [];
   private readonly callbackAborts = new WeakSet<ScriptLanguageError>();
@@ -584,6 +608,8 @@ class PreprocessorEngine {
     const now = options.now ?? (() => new Date());
     this.now = () => this.invokeCallback(now);
     this.report = options.report;
+    const debugEval = options.debugEval;
+    this.debugEval = debugEval === undefined ? undefined : text => this.invokeCallback(() => debugEval(text));
     this.memory = root instanceof SourceScriptStorage ? root.memory : options.memory;
     this.heap = heap ?? new PrecompMemory(this.memory);
     this.limits = Object.freeze({
@@ -1409,6 +1435,12 @@ class PreprocessorEngine {
 
   private expandDefine(macro: PrecompDefine, location: SourceLocation): TokenChain {
     const argumentsList = macro.numparms !== 0 ? this.readMacroArguments(macro, location) : [];
+    if (this.debugEval !== undefined) {
+      for (const [index, first] of argumentsList.entries()) {
+        this.debugEval(`define parms ${index}:`);
+        for (const token of this.heap.chain(first)) this.debugEval(token.token.string);
+      }
+    }
     const expanded: TokenChain = { first: 0, last: 0, count: 0 };
     for (let id = macro.tokens; id !== 0;) {
       let defined = this.heap.token(id);
@@ -1569,7 +1601,14 @@ class PreprocessorEngine {
     const tokens = Array.from(this.heap.chain(expression.first), token => this.snapshotToken(token));
     const value = new ExpressionParser(tokens, integerMode, name => this.macros.has(name),
       (message, failureLocation) => this.fail(message, failureLocation), location,
-      (message, failureLocation) => this.error(message, failureLocation)).evaluate();
+      (message, failureLocation) => this.error(message, failureLocation), this.debugEval,
+      error => this.isSourceFailure(error)).evaluate();
+    if (this.debugEval !== undefined) {
+      const label = form === "hash" ? "eval" : "$eval";
+      this.debugEval(`${label}:`);
+      for (const token of tokens) this.debugEval(` ${token.text}`);
+      this.debugEval(`${label} result: ${debugEvaluationValue(value, integerMode)}`);
+    }
     this.heap.freeTokens(expression.first);
     return value;
   }

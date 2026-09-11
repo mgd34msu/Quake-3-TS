@@ -6,6 +6,7 @@ import { ChatDestination } from "../botlib/chat.ts";
 import { vec3 } from "../core/math.ts";
 import { GameType, Team } from "../shared/definitions.ts";
 import { botInitialChat } from "./ai-chat.ts";
+import { botPrintTeamGoal } from "./ai-command.ts";
 import { botEntityInfo } from "./ai-combat.ts";
 import type { GameAiContext } from "./ai-context.ts";
 import { BotLongTermGoal, BotTeamTaskPreference, CTF_GETFLAG_TIME, CTF_RETURNFLAG_TIME,
@@ -37,6 +38,7 @@ export function botVoiceChatGetFlag(context: GameAiContext, state: BotState, cli
   if (context.gameType === GameType.GT_CTF) botGetAlternateRouteGoal(context, state, botOppositeTeam(context, state));
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatOffense(context: GameAiContext, state: BotState, client: number, mode: number): void {
@@ -53,6 +55,7 @@ export function botVoiceChatOffense(context: GameAiContext, state: BotState, cli
   }
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatDefend(context: GameAiContext, state: BotState, client: number, _mode: number): void {
@@ -67,6 +70,7 @@ export function botVoiceChatDefend(context: GameAiContext, state: BotState, clie
   state.defendAwayTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatDefendFlag(context: GameAiContext, state: BotState, client: number, mode: number): void {
@@ -82,6 +86,7 @@ export function botVoiceChatPatrol(context: GameAiContext, state: BotState, clie
   context.library.chat.enterChat(state.cs, client, ChatDestination.Tell);
   botVoiceChatOnly(context, state, -1, "onpatrol");
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 function locateRequester(context: GameAiContext, state: BotState, client: number): boolean {
@@ -110,6 +115,7 @@ export function botVoiceChatCamp(context: GameAiContext, state: BotState, client
   state.arriveTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatFollowMe(context: GameAiContext, state: BotState, client: number, _mode: number): void {
@@ -126,11 +132,13 @@ export function botVoiceChatFollowMe(context: GameAiContext, state: BotState, cl
   state.arriveTime = 0;
   botSetTeamStatus(context, state);
   botRememberLastOrderedTask(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatFollowFlagCarrier(context: GameAiContext, state: BotState, _client: number, mode: number): void {
   const carrier = botTeamFlagCarrier(context, state);
   if (carrier >= 0) botVoiceChatFollowMe(context, state, carrier, mode);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatReturnFlag(context: GameAiContext, state: BotState, client: number, _mode: number): void {
@@ -138,6 +146,7 @@ export function botVoiceChatReturnFlag(context: GameAiContext, state: BotState, 
   ordered(context, state, client, BotLongTermGoal.RETURNFLAG, CTF_RETURNFLAG_TIME);
   state.rushBaseAwayTime = 0;
   botSetTeamStatus(context, state);
+  if (context.library.debugBuild) botPrintTeamGoal(context, state);
 }
 
 export function botVoiceChatStartLeader(context: GameAiContext, state: BotState, client: number, _mode: number): void {

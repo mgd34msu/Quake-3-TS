@@ -16,6 +16,24 @@ import type { BotMemory, BotMemoryAllocation } from "./memory.ts";
 const MAX_REACHABILITY = 65536;
 const LINK_BYTES = 48;
 
+export type AasReachabilityCount = "swim" | "equal floor" | "step" | "barrier" | "waterjump" | "walkoffledge" | "jump"
+  | "ladder" | "walk" | "teleport" | "funcbob" | "elevator" | "grapple" | "rocketjump" | "jumppad";
+const REACH_COUNT_LABELS: readonly AasReachabilityCount[] = ["swim", "equal floor", "step", "barrier", "waterjump", "walkoffledge", "jump", "ladder",
+  "walk", "teleport", "funcbob", "elevator", "grapple", "rocketjump", "jumppad"];
+
+/** The source counters survive map initialization, alongside the bot library. */
+export class AasReachabilityDebugState {
+  private readonly counts = new Map<AasReachabilityCount, number>();
+  constructor(readonly profile: { readonly debug: boolean; readonly reachDebug: boolean } = { debug: false, reachDebug: false }) {}
+
+  count(category: AasReachabilityCount): void { this.counts.set(category, ((this.counts.get(category) ?? 0) + 1) | 0); }
+
+  printCounts(print: AasReachabilityOptions["print"]): void {
+    if (!this.profile.debug) return;
+    for (const category of REACH_COUNT_LABELS) print(1, `${String(this.counts.get(category) ?? 0).padStart(6)} reach ${category}\n`);
+  }
+}
+
 /** Standalone instances are diagnostic records; pool cells override the byte borrow. */
 export class AasLinkedReachability {
   private diagnosticBytes: Uint8Array | null = null;
@@ -134,6 +152,7 @@ class AasReachabilityPool {
 }
 
 export interface AasReachabilityContext {
+  readonly debugState: AasReachabilityDebugState;
   readonly world: AasWorldState;
   readonly spatial: AasSpatial;
   readonly bspEntities: AasBspEntities;
@@ -149,6 +168,7 @@ export interface AasReachabilityContext {
 }
 
 export interface AasReachabilityOptions {
+  readonly debugState?: AasReachabilityDebugState;
   readonly world: AasWorldState;
   readonly spatial: AasSpatial;
   readonly bspEntities: AasBspEntities;
@@ -169,6 +189,7 @@ function sourceInteger(value: number, operation: string): number {
 
 /** Map-owned AAS reachability heap and the source incremental initialization state. */
 export class AasReachabilityGenerator implements AasReachabilityContext {
+  readonly debugState: AasReachabilityDebugState;
   readonly world: AasWorldState;
   readonly spatial: AasSpatial;
   readonly bspEntities: AasBspEntities;
@@ -189,6 +210,7 @@ export class AasReachabilityGenerator implements AasReachabilityContext {
   private readonly special: AasReachabilitySpecial;
 
   constructor(private readonly options: AasReachabilityOptions) {
+    this.debugState = options.debugState ?? new AasReachabilityDebugState();
     this.world = options.world;
     this.spatial = options.spatial;
     this.bspEntities = options.bspEntities;
@@ -289,6 +311,7 @@ export class AasReachabilityGenerator implements AasReachabilityContext {
       this.special.teleport();
       this.special.elevator();
       this.special.funcBobbing();
+      this.debugState.printCounts(this.print);
       this.store();
       if (this.pool === null) throw new Error("AAS_ShutDownReachabilityHeap: source pool is missing");
       this.world.memory.free(this.pool.allocation);

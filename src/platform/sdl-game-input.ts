@@ -11,11 +11,11 @@ import type { UnixIo } from "./unix-io.ts";
 export { sdlJoystickAxes } from "./source-input.ts";
 
 export interface SdlGameInputOptions {
-  readonly window: SdlWindow;
-  readonly unix: UnixIo;
+  readonly window: Pick<SdlWindow, "beginInput" | "closed" | "ticks" | "flags" | "relativeMouse" | "pollEvents" | "positionOrigin">;
+  readonly unix: Pick<UnixIo, "queueEvent">;
   readonly cvars: CvarRegistry;
   readonly keys: Pick<ClientKeys, "getCatcher">;
-  readonly clock: SystemClock;
+  readonly clock: Pick<SystemClock, "milliseconds">;
   readonly print: (text: string) => undefined;
   readonly source: SourceInputState;
 }
@@ -108,7 +108,7 @@ export function sdlEventTime(timestamp: number, ticks: number, now: number, subf
 }
 
 function joystickEvent(event: SdlEvent): event is SdlJoystickEvent {
-  return event.kind === "joystick-axis" || event.kind === "joystick-button" || event.kind === "joystick-removed";
+  return event.kind === "joystick-axis" || event.kind === "joystick-hat" || event.kind === "joystick-button" || event.kind === "joystick-removed";
 }
 
 /** Borrows the actual window, queue, key catcher, cvars and engine clock. */
@@ -249,7 +249,13 @@ export class SdlGameInput {
         return;
       }
       case "window":
-        if (event.event === 14) this.quit(event.timestamp);
+        if (event.event === 4 && (window.flags & 1) === 0) {
+          // WM_MOVE persists the outer window position. SDL supplies that directly.
+          const { cvars } = this.options;
+          cvars.setValue("vid_xpos", event.data1 - window.positionOrigin.x);
+          cvars.setValue("vid_ypos", event.data2 - window.positionOrigin.y);
+          cvars.clearModified("vid_xpos"); cvars.clearModified("vid_ypos");
+        } else if (event.event === 14) this.quit(event.timestamp);
         // A recorded loss still releases keys if focus returned before this poll.
         // Acquisition in frame always uses the current native window flags.
         else if (event.event === 13 || ((event.event === 7 || event.event === 2) && (window.flags & 0x200) === 0)) {
@@ -272,7 +278,8 @@ export class SdlGameInput {
   /** IN_JoyMove precedes source mouse capture policy and packet polling. */
   frame(): void {
     this.requireOpen();
-    this.options.source.joystickFrame((key, down, time) => { this.key(key, down, time); });
+    this.options.source.joystickFrame((key, down, time) => { this.key(key, down, time); },
+      (dx, dy, time) => { this.options.unix.queueEvent({ kind: "mouse", dx, dy, time }); });
     const { window, keys, clock } = this.options, flags = window.flags;
     const mouse = this.options.source.mouse;
     const consoleWindowed = (keys.getCatcher() & KeyCatcher.Console) !== 0 && (flags & 1) === 0;

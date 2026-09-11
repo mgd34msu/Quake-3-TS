@@ -1,8 +1,9 @@
 // Port of id Software's common.c/cmd.c/cvar.c common console and configuration lifetime.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import { CommonFileState } from "../assets/filesystem-state.ts";
+import { hostRootInput } from "../assets/native-root.ts";
 import { checkedGameDirectory, pathCompare } from "../assets/vfs.ts";
-import type { VfsSearchOptions } from "../assets/vfs.ts";
+import type { NativeSearchRoots, VfsRootOptions } from "../assets/vfs.ts";
 import type { WritableLog } from "../assets/writable-files.ts";
 import { CollisionMapLoader } from "../collision/map-loader.ts";
 import { CollisionCounters } from "../collision/counters.ts";
@@ -20,11 +21,13 @@ import type {
 import { ConsoleOutput } from "../core/console-output.ts";
 import { CommonError } from "../core/common-error.ts";
 import { CvarFlag, CvarRegistry } from "../core/cvar.ts";
+import { RETAIL_PRODUCT_PROFILE } from "../core/product-profile.ts";
+import type { ProductProfile } from "../core/product-profile.ts";
 import { ZoneArena } from "../core/zone.ts";
 import { SourceZoneStrings } from "../core/zone-strings.ts";
 import type { CvarSnapshot, CvarStringInput } from "../core/cvar.ts";
 import { sourceFilter } from "../core/filter.ts";
-import { nativeAtof } from "../core/native-numeric.ts";
+import { nativeAtof, nativeAtoi } from "../core/native-numeric.ts";
 import type { LinuxNativeRandom } from "../core/native-random.ts";
 import type { SystemClock } from "../platform/system-clock.ts";
 import { VmRegistry } from "../vm/registry.ts";
@@ -51,7 +54,7 @@ export type CommonBuildProfile =
   | { readonly kind: "dedicated" }
   | { readonly kind: "client"; readonly client: CommonClientBootstrap };
 export interface CommonConsoleOptions {
-  readonly roots: VfsSearchOptions;
+  readonly roots: VfsRootOptions;
   readonly startup: StartupCommands;
   readonly random: LinuxNativeRandom;
   readonly build: CommonBuildProfile;
@@ -65,11 +68,18 @@ export type CommonErrorCvarName = "com_buildScript" | "sv_running" | "cl_running
 type CommonBinding = CommonErrorCvarName | "dedicated" | "developer" | "logfile";
 type CommonFileOwner = { readonly kind: "unconfigured" } | {
   readonly kind: "configured";
-  readonly roots: VfsSearchOptions;
+  readonly roots: VfsRootOptions;
   readonly files: CommonFileState;
 };
 
 function argument(context: CommandContext, index: number): string { return context.argv[index] ?? ""; }
+function startupDebug(startup: StartupCommands, name: string): boolean {
+  let enabled = false;
+  for (const line of startup.lines) {
+    if (line.argv[0] === "set" && line.argv[1]?.toLowerCase() === name.toLowerCase()) enabled = nativeAtoi(line.argv[2] ?? "") !== 0;
+  }
+  return enabled;
+}
 // The pinned Linux/glibc print profile formats a NULL %s argument as (null).
 function cvarPrintText(value: CvarStringInput | null): string {
   return value === null ? "(null)" : typeof value === "string" ? value : value.value;
@@ -94,7 +104,11 @@ function sourceDate(date: Date): string {
 
 export class CommonConsole {
   readonly sound = new SoundOutput();
-  readonly vm = new VmRegistry(text => { this.output.print(text); });
+  readonly vm = new VmRegistry(text => { this.output.print(text); }, () => {
+    const level = this.cvars.get("com_vmDebug")?.integerValue ?? 0;
+    return level <= 0 ? { kind: "release" } : { kind: "debug", trace: level >= 3 ? 2 : level === 2 ? 1 : 0,
+      breakFunction: this.cvars.get("com_vmBreakFunction")?.integerValue ?? 0 };
+  });
   readonly cdKey: CommonCdKeyState;
   readonly cvars: CvarRegistry;
   readonly collisionDebug: CollisionDebugSurface;
@@ -108,8 +122,9 @@ export class CommonConsole {
   readonly journal: CommonJournal;
   readonly eventMemory = new CommonEventMemory(() => this.mainZone);
   readonly hunk: CommonHunk;
-  private readonly smallZone = new ZoneArena(512 * 1024, "small");
-  private readonly strings = new SourceZoneStrings(this.smallZone);
+  private readonly smallZone: ZoneArena;
+  private readonly strings: SourceZoneStrings;
+  private readonly zoneDebug: boolean;
   private zone: ZoneArena | null = null;
   private fileOwner: CommonFileOwner = { kind: "unconfigured" };
   private phase: "core" | "filesystem" | "runtime" | "initialized" | "closed" = "core";
@@ -119,6 +134,9 @@ export class CommonConsole {
   private lastValidFileSystem: { readonly base: string; readonly game: string } | null = null;
   private commonClock: SystemClock | null = null;
   private vmInitialized = false;
+  private selectedProductProfile: ProductProfile = RETAIL_PRODUCT_PROFILE;
+
+  get productProfile(): ProductProfile { return this.selectedProductProfile; }
 
   static async open(options: CommonConsoleOptions, adopt: (common: CommonConsole) => undefined): Promise<CommonConsole> {
     const common = new CommonConsole(options);
@@ -148,12 +166,18 @@ export class CommonConsole {
   }
 
   private constructor(private readonly options: CommonConsoleOptions) {
+    this.zoneDebug = startupDebug(options.startup, "com_zoneDebug");
+    this.smallZone = new ZoneArena(512 * 1024, "small", this.zoneDebug ? {
+      onAllocationFailure: () => { if (this.logfile !== null) this.logHeap(); },
+    } : undefined);
+    this.strings = new SourceZoneStrings(this.smallZone);
     this.output = new ConsoleOutput(text => { this.normalPrint(text); });
     this.sourceState = new SourceMessageState(text => { this.output.print(text); });
     this.cvars = new CvarRegistry(text => { this.cvarPrint(text); }, text => {
       if (this.bindings.has("developer") && this.cvar("developer").integerValue !== 0) this.cvarPrint(text);
     }, this.strings);
-    this.hunk = new CommonHunk(options.build.kind, this.cvars, text => { this.output.print(text); }, this.vm);
+    this.hunk = new CommonHunk(options.build.kind, this.cvars, text => { this.output.print(text); }, this.vm,
+      text => { this.logfile?.write(text); });
     this.collisionDebug = new CollisionDebugSurface({
       cvars: this.cvars,
       windings: {
@@ -189,22 +213,37 @@ export class CommonConsole {
     const options = this.options;
     this.cvars.register("sv_cheats", "1", CvarFlag.ReadOnly | CvarFlag.SystemInfo);
     const zoneMegs = this.cvars.register("com_zoneMegs", "16", CvarFlag.Latch | CvarFlag.Archive).integerValue;
-    this.zone = new ZoneArena((zoneMegs < 20 ? 16 : zoneMegs) * 1048576);
+    this.zone = new ZoneArena((zoneMegs < 20 ? 16 : zoneMegs) * 1048576, "main", this.zoneDebug ? {
+      onAllocationFailure: () => { if (this.logfile !== null) this.logHeap(); },
+    } : undefined);
     this.registerEarlyCommands();
     this.startup.applyVariables(this.cvars, null);
     this.startup.applyVariables(this.cvars, "developer");
+    this.cvars.register("com_vmDebug", "0");
+    this.cvars.register("com_vmBreakFunction", "0");
+    this.cvars.register("com_botDebug", "0", CvarFlag.Init);
+    this.cvars.register("com_gameDebug", "0", CvarFlag.Init);
+    this.cvars.register("com_serverDebug", "0", CvarFlag.Init);
+    this.cvars.register("com_rendererDebug", "0", CvarFlag.Init);
+    this.cvars.register("com_zoneDebug", "0", CvarFlag.Init);
+    this.cvars.register("com_hunkDebug", "0", CvarFlag.Init);
+    const prereleaseDemo = this.cvars.register("com_prereleaseDemo", "0", CvarFlag.Init).integerValue !== 0;
+    const prereleaseTeamArena = this.cvars.register("com_prereleaseTeamArenaDemo", "0", CvarFlag.Init).integerValue !== 0;
+    this.selectedProductProfile = prereleaseDemo
+      ? { kind: "prerelease-demo", teamArenaUi: prereleaseTeamArena ? "demo" : "retail" }
+      : prereleaseTeamArena ? { kind: "prerelease-ta-demo" } : RETAIL_PRODUCT_PROFILE;
     if (options.build.kind === "client") options.build.client.initializeKeyCommands({ commands: this.commands, cvars: this.cvars,
       output: this.output, assertOwnerEntry: options.assertOwnerEntry });
     for (const name of ["fs_cdpath", "fs_basepath", "fs_homepath", "fs_game", "fs_copyfiles", "fs_restrict"]) this.startup.applyVariables(this.cvars, name);
     this.output.print("----- FS_Startup -----\n");
     this.cvars.register("fs_debug", "0"); this.cvars.register("fs_copyfiles", "0", CvarFlag.Init);
-    const cdPath = this.cvars.register("fs_cdpath", options.roots.cdPath ?? "", CvarFlag.Init).value;
-    const dataPath = this.cvars.register("fs_basepath", options.roots.dataPath, CvarFlag.Init).value;
+    this.cvars.register("fs_cdpath", hostRootInput(options.roots.cdPath ?? "").sourceText, CvarFlag.Init);
+    this.cvars.register("fs_basepath", hostRootInput(options.roots.dataPath).sourceText, CvarFlag.Init);
     this.cvars.register("fs_basegame", options.roots.baseGameDirectory ?? "", CvarFlag.Init);
-    const homePath = this.cvars.register("fs_homepath", options.roots.homePath, CvarFlag.Init).value;
+    this.cvars.register("fs_homepath", hostRootInput(options.roots.homePath).sourceText, CvarFlag.Init);
     this.cvars.register("fs_game", options.roots.gameDirectory ?? (options.roots.product === "missionpack" ? "missionpack" : ""), CvarFlag.Init | CvarFlag.SystemInfo);
     this.cvars.register("fs_restrict", "", CvarFlag.Init);
-    const roots = Object.freeze({ dataPath, homePath, cdPath: cdPath === "" ? null : cdPath, product: options.roots.product });
+    const roots = options.roots;
     this.fileOwner = { kind: "configured", roots,
       files: new CommonFileState(roots, text => { this.output.print(text); }, this.sound, this.cvars, this,
         () => this.hunk.arena, () => this.mainZone) };
@@ -326,7 +365,7 @@ export class CommonConsole {
     if (this.fileOwner.kind === "unconfigured") throw new Error("Common filesystem roots are not configured");
     return this.fileOwner;
   }
-  get roots(): VfsSearchOptions { this.opened(); return this.configuredFiles().files.roots; }
+  get roots(): NativeSearchRoots { this.opened(); return this.configuredFiles().files.roots; }
   get fullyInitialized(): boolean { return this.phase === "initialized"; }
 
   /** FS_Startup calls these between publishing the search paths and pure reordering. */
@@ -410,6 +449,11 @@ export class CommonConsole {
     this.bindings.add("dedicated");
     this.hunk.initialize(dedicated !== 0, this.files.fileMemory.loadStack);
     this.commands.register("meminfo", context => { this.memoryInfo(context.argv.length !== 1); });
+    if (this.zoneDebug) this.commands.register("zonelog", () => { this.logHeap(); });
+    if (this.cvars.register("com_hunkDebug", "0", CvarFlag.Init).integerValue !== 0) {
+      this.commands.register("hunklog", () => { this.logHunk(); });
+      this.commands.register("hunksmalllog", () => { this.logHunk(true); });
+    }
     this.cvars.clearModifiedFlags(CvarFlag.Archive);
     const definitions: readonly (readonly [string, string, number])[] = [
       ["com_maxfps", "85", CvarFlag.Archive], ["com_blood", "1", CvarFlag.Archive],

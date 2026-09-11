@@ -1,21 +1,21 @@
 // World traversal and lighting translated from id Software's GPL-2.0-or-later
 // code/renderer/tr_world.c, tr_bsp.c, tr_main.c, tr_surface.c and tr_backend.c.
-import type { BspVertex, BspVisibility } from "../assets/bsp.ts";
+import { createWorldBackendRuntime, defaultPortalPlane } from "./world-backend.ts";
+import type { SurfaceGeometry, SurfacePortalPlane, WorldBackendSurface, SceneDlights, WorldBackendResolvedView, WorldBackendRuntime, WorldBackendTransport, WorldBackendWorld } from "./world-backend.ts";
+import type { BspVisibility } from "../assets/bsp.ts";
 import { SourceBspResource } from "./bsp-resource.ts";
 import { SourceWorldVisibility } from "./visibility.ts";
 import type { RendererBspMap } from "./bsp-resource.ts";
-import type { Md3Surface } from "../assets/md3.ts";
-import type { RegisteredMd4Surface } from "./md4-resource.ts";
-import { md3Surfaces, md3ShaderCount, md3ShaderIndex, md3SurfaceSource } from "./md3-resource.ts";
+import { md3Surfaces, md3ShaderCount, md3ShaderIndex } from "./md3-resource.ts";
 import type { AssetReader, SourceFileReader } from "../assets/reader.ts";
 import type { RetainedFileReader } from "../assets/read-file-memory.ts";
 import { CommonError } from "../core/common-error.ts";
 import { CommonParseCursor, CommonParseState } from "../core/common-parse.ts";
 import type { SourceClusterPVS } from "../collision/topology.ts";
-import { add3, boxOnPlaneSide, dot3, length3, planeFromPoints, scale3, sub3, transformVec4, vec3 } from "../core/math.ts";
+import { add3, boxOnPlaneSide, dot3, length3, scale3, sub3, vec3 } from "../core/math.ts";
 import type { Bounds, Plane, Vec3, Vec4 } from "../core/math.ts";
 import type { SourceFlareScene } from "./flares.ts";
-import type { DrawBatch, RenderClipPlane, RenderView, SourceClipProjection, SourceRenderView, SurfaceViewOperation, TextureImage, ViewOperation } from "./types.ts";
+import type { RenderView, SourceRenderView, SurfaceViewOperation, TextureImage, ViewOperation } from "./types.ts";
 import type { RenderTarget, SourcePreparedViews } from "./commands.ts";
 import type { BuiltinImages } from "./builtin-images.ts";
 import type { RendererImage, RendererImageCatalog } from "./image-resource.ts";
@@ -24,41 +24,35 @@ import { loadRendererImage } from "./image-loader.ts";
 import type { ImageUploadProfile } from "./image-upload.ts";
 import type { ShaderCinematicRegistry } from "./cinematic-command.ts";
 import type { Refdef } from "./refdef.ts";
-import { RDF_HYPERSPACE, RDF_NOWORLDMODEL } from "./refdef.ts";
-import { farClip, snapshotView, viewFrustum, viewProjection, viewProjector } from "./view.ts";
-import { MaterialRegistry, rendererFloatTime } from "./material-registry.ts";
+import { RDF_NOWORLDMODEL } from "./refdef.ts";
+import { farClip, snapshotView, viewFrustum, viewProjection } from "./view.ts";
+import { MaterialRegistry } from "./material-registry.ts";
 import { ShaderTextPrograms } from "./shader-text.ts";
 import type { MaterialLighting, MaterialRecord } from "./material-registry.ts";
 import { finishFailedShader, finishImplicitShader, finishShader } from "./material-finish.ts";
 import type { FinishLoadedImageMetadata, FinishShaderProfile } from "./material-finish.ts";
-import type { RendererRuntimeSettings, RendererSettings } from "./settings.ts";
-import { selectPatchLod } from "./patch-lod.ts";
+import type { RendererSettings } from "./settings.ts";
 import type { PatchGrid } from "./patch-lod.ts";
 import type { PatchMemoryProfile } from "./patch.ts";
 import { BspMarkProjector } from "./marks.ts";
 import type { MarkGeometry, MarkSurface, SourceMarkProjection } from "./marks.ts";
 import { materialFlags } from "./material-flags.ts";
 import { normalizeShaderName, stripShaderExtension } from "./material.ts";
-import type { FinishedStageImage, RegisteredImage, RegisteredShaderVideo, RegisteredSun, SourceImageRequest, SourceSkyFaceName } from "./material.ts";
-import { deformGeometry, RendererNoise } from "./deform.ts";
-import { snapshotSourceDebugOperations } from "./debug-draw.ts";
-import { SkyBuilder } from "./sky.ts";
-import { drawSun } from "./sun.ts";
-import { fogCoordinates } from "./fog.ts";
+import type { FinishedStageImage, RegisteredImage, RegisteredShaderVideo, RegisteredSun, SourceImageRequest } from "./material.ts";
 import { normalize3 } from "../core/math.ts";
 import { lightForPoint } from "./lighting.ts";
-import type { DynamicLight, EntityLighting, LightingSample } from "./lighting.ts";
+import type { DynamicLight, LightingSample } from "./lighting.ts";
 import { md3FogIndex, prepareMd3EntityPose } from "./model-geometry.ts";
 import { SceneModelRegistry, modelViewOrigin, modelWorldPoint } from "./scene-models.ts";
-import type { RefEntity, RefPoly, RefPolyVertex, SceneInlineModel, SceneModel, SceneShader, SceneSkin, SourceRefEntity, SourceRefEntityRecord } from "./ref-entity.ts";
+import type { RefEntity, RefPoly, RefPolyVertex, SceneInlineModel, SceneModel, SceneShader, SceneSkin, SourceRefEntity } from "./ref-entity.ts";
 import { RF_DEPTHHACK, RF_FIRST_PERSON, RF_THIRD_PERSON, RF_SHADOW_PLANE, RF_NOSHADOW } from "./ref-entity.ts";
-import { polyGeometry, railGeometry, spriteFog, spriteGeometry } from "./entity-primitives.ts";
+import { polyGeometry, spriteFog } from "./entity-primitives.ts";
 import type { MaterialPicture } from "./picture-material.ts";
-import { iterateMaterialOperations, evaluateStencilShadowSurface, snapshotStageBindings } from "./picture-material.ts";
-import { stencilShadowFinishVertices } from "./stencil-shadows.ts";
+import { snapshotStageBindings } from "./picture-material.ts";
 import { SourceTessState } from "./tess-state.ts";
 import type { RendererPerformanceCounters } from "./performance.ts";
 import { RendererFontRegistry } from "./font-registry.ts";
+import type { FontGenerationServices } from "./font-registry.ts";
 import { SourceSceneEntities } from "./scene-entities.ts";
 import { SOURCE_BACKEND_RELEASE32, SourceBackendMemory } from "./backend-memory.ts";
 import { decomposeSourceDrawSort, SOURCE_DRAW_ENTITY_WORLD, SourceDrawSurfaces } from "./draw-surfaces.ts";
@@ -67,11 +61,9 @@ import type { SourceDrawSortRange } from "./draw-sort.ts";
 import type { SourceSceneRange } from "./scene-entities.ts";
 import { SourceSceneSubmission } from "./scene-submission.ts";
 import type { SourceSceneCapture } from "./scene-submission.ts";
-import type { TessWriter } from "./tess-state.ts";
 import type { HunkAccountingProfile } from "./hunk-accounting.ts";
-import { portalAxisPositions, portalBeamPositions, portalEyePlane, portalGridGeometry, portalSurfaceIsMirror, portalSurfaceOffscreen, portalViewForSurface } from "./portal.ts";
 import type { PortalView } from "./portal.ts";
-import { bmodelDlightMask, faceDlightMask, gridDlightMask, iterateProjectedDlights, receivesProjectedDlights, splitDlightMask } from "./dlight.ts";
+import { bmodelDlightMask, faceDlightMask, gridDlightMask, splitDlightMask } from "./dlight.ts";
 
 export interface WorldCamera { readonly origin: Vec3; readonly angles: Vec3 }
 export interface WorldFrame {
@@ -106,6 +98,8 @@ export interface RendererResources {
   readonly builtins: BuiltinImages;
   readonly memoryProfile: HunkAccountingProfile;
   readonly tess: SourceTessState;
+  readonly worldBackend: WorldBackendRuntime;
+  readonly backendMaterials: { readonly defaultMaterial: MaterialRecord; readonly flareMaterial: MaterialRecord; readonly sunMaterial: MaterialRecord };
   readonly fonts: RendererFontRegistry;
   readonly sceneEntities: SourceSceneEntities;
   readonly settings: RendererSettings;
@@ -160,6 +154,8 @@ export interface RendererResources {
 export const RendererResources = Object.freeze({ create: createRendererResources });
 
 export interface RendererResourceServices {
+  readonly debugBuild?: boolean;
+  readonly worldTransport?: WorldBackendTransport;
   readonly patchMemory: PatchMemoryProfile;
   /** R_Init's already reset tess and selected command backend, shared with the live queue. */
   readonly tess?: SourceTessState;
@@ -175,6 +171,7 @@ export interface RendererResourceServices {
     | { readonly kind: "shaders"; readonly listShaders: RendererResources["listShaders"] }
     | { readonly kind: "models"; readonly listModels: RendererResources["listModels"]; readonly listSkins: RendererResources["listSkins"] }) => undefined;
   readonly drawDebugSurface: (drawPoly: (color: number, numPoints: number, points: readonly Vec3[]) => undefined) => undefined;
+  readonly fontGeneration?: Pick<FontGenerationServices, "saveFontData" | "writeFile">;
 }
 
 function at<T>(items: readonly T[], index: number): T {
@@ -290,69 +287,7 @@ function initialCamera(map: RendererBspMap): WorldCamera {
   return { origin: { ...origin, z: origin.z + 26 }, angles };
 }
 
-interface SurfaceGeometry { readonly vertices: readonly BspVertex[]; readonly indices: readonly number[] }
 type SourceModelEntity = Extract<SourceRefEntity, { readonly kind: "model" }>;
-type SurfacePortalPlane = { readonly kind: "fixed"; readonly plane: Plane } | { readonly kind: "triangle" };
-interface SurfaceSubmissionData {
-  readonly kind: "surface";
-  readonly mesh: SurfaceGeometry;
-  readonly plane: SurfacePortalPlane;
-  readonly grid: PatchGrid | null;
-  readonly material: MaterialRecord;
-  readonly fog: number;
-  readonly entityOrder: number;
-  readonly entity: SourceRefEntityRecord | null;
-  readonly lighting: EntityLighting | null;
-  readonly worldSurface?: number;
-  readonly dlighted?: boolean | number;
-  readonly dlightBeforeOverflow?: boolean;
-}
-type SurfaceSubmission = SurfaceSubmissionData & { readonly writer: "bsp-normal" | "poly" };
-/** R_AddMD3Surfaces retains the source pointer without touching its mesh payload. */
-interface Md3Submission {
-  readonly kind: "md3";
-  readonly surface: Md3Surface;
-  readonly material: MaterialRecord;
-  readonly entity: SourceRefEntityRecord | null;
-  readonly entityOrder: number;
-  readonly fog: number;
-}
-/** R_AddEntitySurfaces publishes the shared SF_ENTITY pointer without geometry. */
-interface ProceduralSubmission {
-  readonly kind: "entity";
-  readonly entity: SourceRefEntityRecord | null;
-  readonly material: MaterialRecord;
-  readonly entityOrder: number;
-  readonly fog: number;
-}
-/** SF_FLARE and SF_SKIP emit no geometry; sorted shader/entity state still runs. */
-type EmptySubmission = Pick<SurfaceSubmissionData, "material" | "fog" | "entityOrder"> & {
-  readonly kind: "flare" | "skip";
-  readonly entity: SourceRefEntityRecord | null;
-};
-interface Md4Submission {
-  readonly kind: "md4";
-  readonly surface: RegisteredMd4Surface;
-  readonly material: MaterialRecord;
-  readonly entity: SourceRefEntityRecord | null;
-  readonly entityOrder: number;
-  readonly fog: number;
-}
-type EntitySubmission = (SurfaceSubmission | ProceduralSubmission | EmptySubmission | Md3Submission | Md4Submission)
-  & { readonly dlighted?: boolean | number };
-interface SceneDlights {
-  readonly lights: readonly DynamicLight[];
-  transformed: readonly DynamicLight[] | null;
-}
-const defaultPortalPlane = { kind: "fixed", plane: { normal: { x: 1, y: 0, z: 0 }, distance: 0 } } satisfies SurfacePortalPlane;
-
-function trianglePortalPlane(mesh: SurfaceGeometry): Plane {
-  const plane = planeFromPoints(at(mesh.vertices, at(mesh.indices, 0)).position,
-    at(mesh.vertices, at(mesh.indices, 1)).position, at(mesh.vertices, at(mesh.indices, 2)).position);
-  if (plane === null) throw new Error("R_PlaneForSurface: degenerate portal triangle has an undefined source plane distance");
-  return plane;
-}
-
 async function createRendererResources(vfs: AssetReader & RetainedFileReader & Pick<SourceFileReader, "readFileLength" | "readFileOptional">,
   memoryProfile: HunkAccountingProfile, settings: RendererSettings,
   services: RendererResourceServices): Promise<RendererResources> {
@@ -378,8 +313,8 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
       fogBounds: () => activeLightmaps === null ? [] : activeLightmaps.compiled.fogBounds,
       developerEnabled: () => settings.runtime.developerEnabled,
       print: services.print,
-    }, { kind: "source", backend, shaderHandle: shader => shaderMaterial(shader).order });
-    return { backend, entities, submission, drawSurfaces: new SourceDrawSurfaces<EntitySubmission>(backend) };
+    }, { kind: "source", backend, shaderHandle: shader => shaderMaterial(shader).order }, settings.hardwareType);
+    return { backend, entities, submission, drawSurfaces: new SourceDrawSurfaces<WorldBackendSurface>(backend) };
   }
   const primaryScene = createSceneStorage(primaryMemory);
   const secondaryScene = secondaryMemory === null ? null : createSceneStorage(secondaryMemory);
@@ -407,13 +342,11 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
   function debugGraphics(): void {
     if (settings.runtime.debugSurface === 0) return;
     services.target.syncRenderThread();
-    services.target.executeSurfaceOperations([{ kind: "begin-debug-surface", whiteImage, cull: tess.cullState("front") }]);
+    if (services.worldTransport === undefined) services.target.executeSurfaceOperations(worldBackend.beginDebugSurface());
+    else services.worldTransport.beginDebugSurface();
     services.drawDebugSurface((color, numPoints, points) => {
-      if (!Number.isInteger(numPoints) || numPoints < -0x80000000 || numPoints > 0x7fffffff) throw new RangeError("R_DebugPolygon point count must be int32");
-      const positions: Vec4[] = [];
-      for (let index = 0; index < numPoints; index++) positions.push(tess.projectPosition(at(points, index)));
-      services.target.executeSurfaceOperations([{ kind: "debug-polygon", color, positions }]);
-      tess.setDepthRange([0, 1]);
+      if (services.worldTransport === undefined) services.target.executeSurfaceOperations(worldBackend.debugPolygon(color, numPoints, points));
+      else services.worldTransport.debugPolygon(color, numPoints, points);
     });
   }
   function publishImage(request: SourceImageRequest, decoded: TextureImage): RendererImage {
@@ -478,92 +411,15 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
     return { kind: "loaded", tmu, binding: { kind: "images", playback: { kind: "single", image: stageImage(image) } } };
   }
   function registeredImage(image: RendererImage, tmu: 0 | 1 = 0): RegisteredImage { return { frame: stageImage(image), tmu }; }
-  const noise = new RendererNoise();
   let sun: RegisteredSun = { light: { x: 0, y: 0, z: 0 }, direction: normalize3(vec3(0.45, 0.3, 0.9)) };
-  const skyBuilder = new SkyBuilder();
-  let backendFar = 0;
-  let skyRenderedThisView = false;
-  let backendSunProjector = tess.projector;
-  let backendEntityInitialized = false;
-  let backendDlights: SceneDlights | null = null;
-  let backendPolygonOffset: WorldFrame["polygonOffset"];
-  function* evaluateWorldSurface(dlightBits: number, identityLight: number, rendererNoise: RendererNoise, runtime: RendererRuntimeSettings): Generator<SurfaceViewOperation, void, unknown> {
-    if (tess.numIndexes === 0) return;
-    const material = tess.material;
-    if (material === null) throw new Error("Retained world surface has no begun material");
-    if (material.kind === "stencil-shadow") {
-      yield* evaluateStencilShadowSurface(tess, position => tess.projectPosition(position), services.target.stencilBits);
-      return;
-    }
-    const debugSort = runtime.debugSort;
-    if (debugSort !== 0 && debugSort < material.sort) return;
-    performance.backEnd.c_shaders = (performance.backEnd.c_shaders + 1) | 0;
-    performance.backEnd.c_vertexes = (performance.backEnd.c_vertexes + tess.numVertexes) | 0;
-    performance.backEnd.c_indexes = (performance.backEnd.c_indexes + tess.numIndexes) | 0;
-    performance.backEnd.c_totalIndexes = (performance.backEnd.c_totalIndexes + tess.numIndexes * material.finished.numUnfoggedPasses) | 0;
-    const definition = material.definition, entity = tess.context.entity;
-    const sky = material.finished.iterator.kind === "sky" ? material.sky : null;
-    if (material.finished.iterator.kind === "sky" && sky === null) throw new Error(`${material.name}: sky iterator has no registered sky data`);
-    const projectVertex = (position: Vec3): Vec4 => tess.projectPosition(position);
-    let input = dlightBits === 0 ? null : tess.snapshotGeometry();
-    if (sky !== null) {
-      if (settings.runtime.fastSky !== 0) {
-        yield* snapshotSourceDebugOperations(tess, projectVertex, material.whiteImage, runtime);
-        tess.endSurface();
-        yield { kind: "log-comment", text: "----------\n" };
-        return;
-      }
-      // RB_ClipSkyPolygons subtracts the world view origin from local tess cells,
-      // even on entities. Box translation/cloud positions then use the current projector.
-      skyBuilder.clip([tess.snapshotIndexedGeometry()], tess.view.origin);
-      const depth = settings.runtime.showSky !== 0 ? 0 : 1;
-      tess.setDepthRange([depth, depth]);
-      yield { kind: "depth-range", range: tess.actualDepthRange };
-      const skyMesh = skyBuilder.build(tess.view.origin, backendFar);
-      const drawFaces: readonly SourceSkyFaceName[] = ["rt", "lf", "bk", "ft", "up", "dn"];
-      if (sky.outer !== null && sky.outer.image("rt").image !== fallback) {
-        yield { kind: "sky-box-state", identityLight };
-        for (const face of skyMesh.box) {
-          const registered = sky.outer.image(at(drawFaces, face.face));
-          yield { kind: "sky-side", image: registered.image, strips: face.strips.map(strip => strip.map(index => {
-            const vertex = at(face.geometry.vertices, index);
-            return { position: projectVertex(vertex.position), texCoord: vertex.texCoord };
-          })) };
-        }
-      }
-      tess.resetGeometry();
-      if (sky.cloudHeight !== 0) for (let stage = 0; stage < material.finished.numUnfoggedPasses; stage++) {
-        tess.appendGeometry({ vertices: skyMesh.clouds.vertices, indices: stage === 0 ? skyMesh.clouds.indices : [] }, "cloud");
-      }
-      input = dlightBits === 0 ? null : tess.snapshotGeometry();
-    }
-    const deformed = definition === null || definition.deforms.length === 0 ? input : deformGeometry(tess, definition.deforms,
-      { axis: tess.view.axis, mirror: tess.view.mirror, entityAxis: tess.context.kind === "world" ? null : tess.context.orientationAxis,
-        nonNormalizedAxis: entity !== null && "nonNormalizedAxes" in entity && entity.nonNormalizedAxes ? entity.axis[0] : null }, tess.shaderTime, rendererNoise,
-      entity !== null && "shadowPlane" in entity ? { axis: tess.context.orientationAxis, origin: tess.context.orientationOrigin, shadowPlane: entity.shadowPlane,
-        lightDir: tess.context.lighting.lightDir } : null);
-    const projectedLights = function* (): Generator<DrawBatch, void, unknown> {
-      if (dlightBits === 0 || deformed === null || !receivesProjectedDlights(material) || backendDlights === null || backendDlights.lights.length === 0) return;
-      const image = builtinImages.find("*dlight");
-      if (image === undefined) throw new Error("source dynamic-light image is not registered");
-      if (backendDlights.transformed === null) throw new Error("source projected light origins have not been transformed");
-      for (let index = 0; index < backendDlights.transformed.length; index++) {
-        const mask = dlightBits & (1 << index);
-        if (mask !== 0) yield* iterateProjectedDlights(deformed, mask, backendDlights.transformed, image.image, projectVertex,
-          tess.actualCullState, performance);
-      }
-    };
-    yield* iterateMaterialOperations(material, tess, projectVertex, identityLight, rendererNoise,
-      runtime, projectedLights(), backendPolygonOffset);
-    if (sky !== null) {
-      tess.setDepthRange([0, 1]);
-      yield { kind: "depth-range", range: tess.actualDepthRange };
-      skyRenderedThisView = true;
-    }
-    yield* snapshotSourceDebugOperations(tess, projectVertex, material.whiteImage, runtime);
-    tess.endSurface();
-    yield { kind: "log-comment", text: "----------\n" };
-  }
+  const worldBackend = createWorldBackendRuntime({
+    ...(services.debugBuild === undefined ? {} : { debugBuild: services.debugBuild }),
+    tess, settings, builtins: builtinImages, identityLight: () => services.imageProfile().colorMappings.identityLight, print: services.print, target: services.target,
+    get defaultMaterial() { return defaultMaterial; },
+    get flareMaterial() { return flareMaterial; },
+    get sunMaterial() { return sunMaterial; },
+    materialBySortedIndex: index => materialRegistry.findBySortedIndex(index),
+  });
   async function playShaderCinematic(name: string): Promise<RegisteredShaderVideo | null> {
     const source = await shaderCinematics.playShaderCinematic(name);
     if (source === null) { diagnostics.add(`${name}: CIN_PlayCinematic failed`); return null; }
@@ -589,7 +445,10 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
           return image === null ? null : registeredImage(image);
         }, playShaderCinematic,
         applySun(value) { sun = value; },
-        initializeSkyTexCoords(height) { backendFar = 1024; skyBuilder.initializeCloudCoordinates(height); } });
+        initializeSkyTexCoords(height) {
+          if (services.worldTransport === undefined) worldBackend.initializeSky(height);
+          else services.worldTransport.initializeSky(height);
+        } });
       const finished = finishShader({ definition: registered.definition, lightmapIndex, images: registered.stages, profile });
       if (registered.kind === "defaulted") diagnostics.add(registered.failure.kind === "source-text" ? registered.failure.error.message
         : `${name}: required image ${registered.failure.request.name} was not found`);
@@ -649,7 +508,7 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
     return at(map.leaves, leaf).cluster;
   }
   const modelRegistry = new SceneModelRegistry(vfs, registerMaterial, memoryProfile, defaultMaterial, services.print,
-    index => materialRegistry.findByHandle(index), () => services.target.syncRenderThread());
+    index => materialRegistry.findByHandle(index), () => services.target.syncRenderThread(), services.debugBuild ?? false);
   const listModels: RendererResources["listModels"] = print => modelRegistry.listModels(print);
   const listSkins: RendererResources["listSkins"] = print => modelRegistry.listSkins(print);
   services.publishListings?.({ kind: "models", listModels, listSkins });
@@ -704,6 +563,7 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
   const map = source?.map ?? null, fogs = map?.fogs ?? [], worldMaterials = source?.materials ?? [];
   const visibility = source === null ? null : new SourceWorldVisibility(source, settings.visibility, performance, services.print);
   const fogTexture = fogs.length === 0 ? null : builtinImages.fogImage;
+  const backendWorld: WorldBackendWorld = { fogs, fogTexture };
   const lightGrid = { grid: source?.lightGrid ?? null }, patches = source?.patches ?? new Map<number, PatchGrid>();
   const geometry: readonly SurfaceGeometry[] = source?.geometry ?? [];
   const markSurfaces: readonly MarkSurface[] = map === null ? [] : map.surfaces.map((surface, index): MarkSurface => {
@@ -795,9 +655,9 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
     if (mask !== 0) performance.frontEnd.c_dlightSurfaces = (performance.frontEnd.c_dlightSurfaces + 1) | 0;
     return mask !== 0;
   }
-  function backendSurfaceDlightBits(index: number): number {
+  function backendSurfaceDlightBits(index: number, frame: 0 | 1): number {
     if (source === null) throw new Error("world dlight surface requires a map");
-    return source.surfaceDlightBits(index, tess.backEndSmpFrame);
+    return source.surfaceDlightBits(index, frame);
   }
   function surfacePortalPlane(index: number): SurfacePortalPlane {
     if (map === null) throw new Error("world portal surface requires a map");
@@ -846,7 +706,7 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
   }
   function prepareView(input: SceneViewInput, capture: SourceSceneCapture, portal: PortalView | null, dlights: SceneDlights,
     frontend: Pick<RendererSettings["runtime"], "zNear" | "lodScale" | "lodBias"> & { readonly smpFrame: 0 | 1; readonly scene: SourceFlareScene }, submit: boolean,
-    drawSurfaces: SourceDrawSurfaces<EntitySubmission>, inheritedBounds: Bounds = { min: vec3(0, 0, 0), max: vec3(0, 0, 0) }): SourcePreparedViews {
+    drawSurfaces: SourceDrawSurfaces<WorldBackendSurface>, inheritedBounds: Bounds = { min: vec3(0, 0, 0), max: vec3(0, 0, 0) }): SourcePreparedViews {
       const refdef = snapshotView(input.refdef);
       const view: WorldFrame = { ...input, refdef,
         ...(input.polygonOffset === undefined ? {} : { polygonOffset: { ...input.polygonOffset } }) };
@@ -861,7 +721,7 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
         visibility.markLeaves(() => map.nodes.length + pointInLeaf(map, portal === null ? refdef.viewOrigin : portal.pvsOrigin));
       const submittedSurfaces = new Set<number>();
       const firstDrawSurf = drawSurfaces.numDrawSurfs;
-      const addDrawSurf = (submission: EntitySubmission): void => {
+      const addDrawSurf = (submission: WorldBackendSurface): void => {
         drawSurfaces.add(submission, submission.material.sortedIndex, submission.entityOrder, submission.fog + 1,
           Number(submission.dlighted ?? false));
       };
@@ -894,13 +754,10 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
       }
       const viewFar = farClip(refdef, visibleBounds);
       performance.zFar = viewFar;
-      const projection = viewProjection(refdef, viewFar, frontend.zNear), project = viewProjector(refdef, projection);
-      const forward = refdef.viewAxis[0];
-      const fogCoords = fogs.map(fog => fogCoordinates(fog, refdef.viewOrigin, forward));
+      const projection = viewProjection(refdef, viewFar, frontend.zNear);
       const entities = Array.from({ length: entityRange.length }, (_, index) => entityRange.entity(index).entity);
       const md3View = entities.length === 0 ? null : { origin: refdef.viewOrigin, forward: refdef.viewAxis[0], projection, frustum, performance,
         isPortal: portal !== null, noCull: resources.settings.runtime.noCull };
-      const viewAxis = refdef.viewAxis;
       const materialByName = (name: string): MaterialRecord => {
         const material = readyModelMaterials.get(normalizeShaderName(name));
         if (material === undefined) throw new Error(`entity material ${name} was not registered before frame`);
@@ -1044,7 +901,7 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
         if (material === null) throw new RangeError(`R_DecomposeSort: sorted shader ${shaderIndex} has no allocated shader`);
         return material;
       };
-      const readDrawSurface = (index: number, sorts: SourceDrawSortRange): EntitySubmission => {
+      const readDrawSurface = (index: number, sorts: SourceDrawSortRange): WorldBackendSurface => {
         const sort = sorts.getSort(index), fields = decomposeSourceDrawSort(sort);
         const surface = drawRange.surface(index), material = drawMaterial(sort);
         const entity = fields.entity === SOURCE_DRAW_ENTITY_WORLD ? null : entityRange.allocatedEntity(fields.entity).entity;
@@ -1052,10 +909,14 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
         return { ...surface, ...state };
       };
       const earlierViews: SourcePreparedViews[] = [];
-      const flushRetainedSurface = function* (): Generator<SurfaceViewOperation, void, unknown> {
-        if (tess.numIndexes === 0) return;
-        if (tess.material?.kind === "stencil-shadow") yield* evaluateStencilShadowSurface(tess, position => tess.projectPosition(position), services.target.stencilBits);
-        else yield* evaluateWorldSurface(tess.dlightBits, services.imageProfile().colorMappings.identityLight, noise, resources.settings.runtime);
+      const backendView: WorldBackendResolvedView = {
+        smpFrame: frontend.smpFrame,
+        refdef, projection, mirror, portal, viewFar, capture, dlights,
+        ...(view.polygonOffset === undefined ? {} : { polygonOffset: view.polygonOffset }),
+        scene: frontend.scene, world: backendWorld, drawRange,
+        get flushBeforeView() { return earlierViews.length !== 0; },
+        surface: index => drawRange.surface(index),
+        surfaceDlightBits: backendSurfaceDlightBits,
       };
       for (let index = 0; index < drawRange.length; index++) {
         const material = drawMaterial(drawRange.getSort(index));
@@ -1063,67 +924,9 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
         if (material.sort === 0) throw new CommonError("drop", `Shader '${material.name}'with sort == SS_BAD`);
         if (portal !== null) { diagnostics.add("WARNING: recursive mirror/portal found"); continue; }
         if (resources.settings.runtime.noPortals || resources.settings.runtime.fastSky === 1) continue;
-        const submission = readDrawSurface(index, drawRange);
-        tess.beginSurface(submission.material, submission.fog + 1, tess.floatTime);
-        if (submission.fog >= 0 && submission.kind !== "flare") {
-          if (fogTexture === null) throw new Error("fogged source portal probe has no registered world fog texture");
-          const fog = at(fogs, submission.fog), coordinates = fogCoordinates(fog, tess.view.origin, tess.view.axis[0]);
-          const { orientationAxis: axis, orientationOrigin: origin } = tess.context;
-          tess.setFogContext({ volume: fog, texture: fogTexture,
-            coordinates: position => coordinates(add3(vec3(
-              dot3(position, { x: axis[0].x, y: axis[1].x, z: axis[2].x }),
-              dot3(position, { x: axis[0].y, y: axis[1].y, z: axis[2].y }),
-              dot3(position, { x: axis[0].z, y: axis[1].z, z: axis[2].z })), origin)) });
-        }
-        const entitySurface = submission.kind === "entity";
-        if ((entitySurface || submission.kind === "md4" && submission.surface.surfaceType === 7) && tess.context.entity === null && !backendEntityInitialized) {
-          throw new Error("SurfIsOffscreen: source backEnd.currentEntity is NULL before the first backend entity selection");
-        }
-        if (entitySurface) {
-          const retained = tess.context.entity;
-          if (retained?.kind === "sprite") tess.appendGeometry(spriteGeometry(retained, tess.view.axis, tess.view.mirror), "stamp");
-          else if (retained?.kind === "rail-core" || retained?.kind === "rail-rings" || retained?.kind === "lightning") {
-            const mesh = railGeometry(retained, tess.view.origin, resources.settings.rail);
-            for (let vertex = 0; vertex < mesh.vertices.length; vertex += 4) {
-              if (tess.wouldOverflow(4, 6)) {
-                const material = tess.material;
-                if (material === null) throw new Error("portal rail overflow without a begun source shader");
-                const fog = tess.fog;
-                services.target.executeSurfaceOperations(flushRetainedSurface());
-                tess.beginSurface(material, fog, tess.floatTime);
-              }
-              tess.appendGeometry({ vertices: mesh.vertices.slice(vertex, vertex + 4),
-                indices: mesh.indices.slice(vertex / 4 * 6, vertex / 4 * 6 + 6).map(index => index - vertex) }, "rail");
-            }
-          } else if (retained?.kind === "beam") {
-            const positions = portalBeamPositions(retained, position => tess.projectPosition(position));
-            if (positions.length !== 0) services.target.executeSurfaceOperations([{ kind: "entity-beam", positions, whiteImage }]);
-          } else services.target.executeSurfaceOperations([{ kind: "entity-axis", positions: portalAxisPositions(position => tess.projectPosition(position)), whiteImage }]);
-        } else if (submission.kind === "md3") {
-          switch (md3SurfaceSource(submission.surface).surfaceType) {
-            case 0: services.print("Bad surface tesselated.\n"); break;
-            case 1: case 8: break;
-            case 6: services.target.executeSurfaceOperations(tess.appendMd3(submission.surface, flushRetainedSurface)); break;
-            default: throw new Error("SurfIsOffscreen: unsupported dispatch through retained MD3 surface allocation");
-          }
-        } else if (submission.kind === "md4") {
-          switch (submission.surface.surfaceType) {
-            case 0: services.print("Bad surface tesselated.\n"); break;
-            case 1: case 8: break;
-            default: tess.appendMd4(submission.surface); break;
-          }
-        } else if (submission.kind === "surface") {
-          const mesh = submission.grid === null ? submission.mesh : portalGridGeometry(submission.grid, tess.context, tess.view, resources.settings.runtime.lodCurveError);
-          const probeMaterial = tess.material;
-          tess.appendGeometry(mesh, submission.writer === "bsp-normal" && (probeMaterial === defaultMaterial || probeMaterial?.kind === "stencil-shadow") ? "bsp" : submission.writer);
-          if (submission.worldSurface !== undefined) tess.addDlightBits(backendSurfaceDlightBits(submission.worldSurface));
-        }
-        const surfacePlane = (): Plane => submission.kind !== "surface" ? defaultPortalPlane.plane
-          : submission.plane.kind === "fixed" ? submission.plane.plane : trianglePortalPlane(submission.mesh);
-        const model = submission.entity?.kind === "model" ? submission.entity : null;
-        if (portalSurfaceOffscreen(tess, refdef.viewOrigin, project, tess.material?.definition?.portalRange ?? 0,
-          () => portalSurfaceIsMirror(surfacePlane(), model, entities))) continue;
-        const child = portalViewForSurface(surfacePlane(), model, entities, refdef);
+        const child = services.worldTransport === undefined
+          ? worldBackend.probeResolved(backendView, readDrawSurface(index, drawRange))
+          : services.worldTransport.probe(backendView, index);
         if (child === null) continue;
         const prepareChild = prepareView({ ...view, refdef: { ...refdef, viewOrigin: child.origin, viewAxis: child.axis } }, capture, child, dlights, frontend, submit, drawSurfaces, visibleBounds);
         performance.zFar = viewFar; // R_MirrorViewBySurface restores viewParms, but not tr.viewCluster.
@@ -1134,184 +937,17 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
         }
         break;
       }
-      const originalTime = rendererFloatTime(refdef.time);
-      const worldAxis = [{ x: 1, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }] satisfies import("../core/math.ts").Axis;
-      const enterView = function* (): Generator<SurfaceViewOperation, void, unknown> {
-        if (earlierViews.length !== 0) yield* flushRetainedSurface();
-        backendFar = viewFar;
-        backendSunProjector = viewProjector(refdef, projection, { origin: refdef.viewOrigin, axis: worldAxis });
-        backendDlights = dlights;
-        backendPolygonOffset = view.polygonOffset;
-        tess.enterView({ origin: refdef.viewOrigin, axis: viewAxis, mirror }, originalTime, refdef);
+      const serialPrepare = function* (executionRange: SourceDrawSortRange = drawRange): Generator<SourceRenderView, void, unknown> {
+        for (const earlier of earlierViews) yield* earlier();
+        yield worldBackend.prepareResolved(backendView, executionRange);
       };
-      const drawView = function* (executionRange: SourceDrawSortRange): Generator<ViewOperation, void, unknown> {
-      if ((refdef.renderFlags & RDF_HYPERSPACE) === 0) {
-        tess.invalidateCull();
-        skyRenderedThisView = false;
-      }
-      backendEntityInitialized = true;
-      tess.setProjector(project);
-      tess.selectWorldEntity(tess.context);
-      performance.backEnd.c_surfaces = (performance.backEnd.c_surfaces + executionRange.length) | 0;
-      const flushSurface = function* (): Generator<SurfaceViewOperation, void, unknown> {
-        if (tess.numIndexes === 0) return;
-        if (tess.fog > 0) {
-          if (fogTexture === null) throw new Error("fogged source surface has no registered world fog texture");
-          const fog = tess.fog - 1, coordinates = at(fogCoords, fog), context = tess.context;
-          const currentEntity = context.kind === "entity" ? context.entity : null;
-          tess.setFogContext({ volume: at(fogs, fog), texture: fogTexture,
-            coordinates: currentEntity?.kind === "model" ? position => coordinates(modelWorldPoint(currentEntity, position)) : coordinates });
-        }
-        yield* flushRetainedSurface();
-      };
-      const restartSurface = function* (): Generator<SurfaceViewOperation, void, unknown> {
-        const material = tess.material, fog = tess.fog;
-        if (material === null) throw new Error("RB_CheckOverflow without a begun source shader");
-        yield* flushSurface();
-        tess.beginSurface(material, fog, tess.floatTime);
-      };
-      const checkOverflow = function* (vertices: number, indices: number): Generator<SurfaceViewOperation, void, unknown> {
-        if (vertices >= 1000 || indices >= 6000) {
-          yield* flushSurface();
-          if (vertices >= 1000) throw new CommonError("drop", `RB_CheckOverflow: verts > MAX (${vertices} > 1000)`);
-          throw new CommonError("drop", `RB_CheckOverflow: indices > MAX (${indices} > 6000)`);
-        }
-        if (tess.numVertexes + vertices >= 1000 || tess.numIndexes + indices >= 6000) yield* restartSurface();
-      };
-      const writeGeometry = (mesh: SurfaceGeometry, writer: TessWriter): void => {
-        const material = tess.material;
-        tess.appendGeometry(mesh, writer === "bsp-normal" && (material === defaultMaterial || material?.kind === "stencil-shadow") ? "bsp" : writer);
-      };
-      let oldMaterial: MaterialRecord | null = null;
-      let oldFog = -1, oldDlighted = 0, oldDlightEntity = -1, oldDepthRange = false, depthHack = false;
-      // RB_RenderDrawSurfList selects shader/entity state before calling the surface writer.
-      for (let index = 0; index < executionRange.length; index++) {
-        const submission = readDrawSurface(index, executionRange), dlighted = Number(submission.dlighted ?? false);
-        if (submission.material !== oldMaterial || submission.fog !== oldFog || dlighted !== oldDlighted
-          || (submission.entityOrder !== oldDlightEntity && !submission.material.definition?.entityMergable)) {
-          if (oldMaterial !== null) yield* flushSurface();
-          tess.beginSurface(submission.material, submission.fog + 1, tess.floatTime);
-          oldMaterial = submission.material; oldFog = submission.fog; oldDlighted = dlighted;
-        }
-        if (submission.entityOrder !== oldDlightEntity) {
-          oldDlightEntity = submission.entityOrder;
-          const drawEntity = submission.entity;
-          const orientation = { localViewOrigin: drawEntity?.kind === "model" ? modelViewOrigin(drawEntity, refdef.viewOrigin) : refdef.viewOrigin,
-            orientationAxis: drawEntity?.kind === "model" ? drawEntity.axis : worldAxis,
-            orientationOrigin: drawEntity?.kind === "model" ? drawEntity.origin : { x: 0, y: 0, z: 0 } };
-          if (drawEntity === null) tess.selectWorldEntity(orientation);
-          else tess.selectSceneEntity(entityRange.allocatedEntity(submission.entityOrder), orientation);
-          tess.setFloatTime(Math.fround(originalTime - Math.fround(drawEntity?.shaderTime ?? 0)));
-          const material = tess.material;
-          if (material === null) throw new Error("RB_RenderDrawSurfList entity selection without a begun source shader");
-          tess.setShaderTime(tess.floatTime - material.timeOffset);
-          tess.setProjector(drawEntity?.kind === "model" ? viewProjector(refdef, projection, drawEntity) : project);
-          if (submission.entity === null) dlights.transformed = dynamicLights.length === 0 ? [] : capture.transformDlights({ x: 0, y: 0, z: 0 }, worldAxis);
-          else if (entityRange.allocatedEntity(submission.entityOrder).needDlights && submission.entity.kind === "model") {
-            dlights.transformed = dynamicLights.length === 0 ? [] : capture.transformDlights(submission.entity.origin, submission.entity.axis);
-          }
-          depthHack = submission.entity !== null && (submission.entity.renderFlags & RF_DEPTHHACK) !== 0;
-          if (oldDepthRange !== depthHack) {
-            tess.setDepthRange([0, depthHack ? 0.3 : 1]);
-            oldDepthRange = depthHack;
-            yield { kind: "depth-range", range: tess.actualDepthRange };
-          }
-        }
-        if (submission.kind === "md3") {
-          switch (md3SurfaceSource(submission.surface).surfaceType) {
-            case 0: services.print("Bad surface tesselated.\n"); break;
-            case 1: case 8: break;
-            case 6: yield* tess.appendMd3(submission.surface, flushSurface); break;
-            default: throw new Error("RB_SurfaceMesh: unsupported dispatch through retained MD3 surface allocation");
-          }
-        } else if (submission.kind === "md4") {
-          const surfaceType = submission.surface.surfaceType;
-          switch (surfaceType) {
-            case 0: services.print("Bad surface tesselated.\n"); break;
-            case 1: case 8: break;
-            default:
-              if (surfaceType === 7) yield* checkOverflow(submission.surface.numVerts, submission.surface.numIndexes);
-              tess.appendMd4(submission.surface);
-              break;
-          }
-        } else if (submission.kind === "surface") {
-          if (submission.grid !== null) {
-            if (submission.worldSurface !== undefined) tess.addDlightBits(backendSurfaceDlightBits(submission.worldSurface));
-            const grid = submission.grid;
-            const worldOrigin = submission.entity?.kind === "model" ? modelWorldPoint(submission.entity, grid.lodOrigin) : grid.lodOrigin;
-            const mesh = selectPatchLod(grid, worldOrigin, refdef.viewOrigin, refdef.viewAxis[0], resources.settings.runtime.lodCurveError);
-            let used = 0;
-            while (used < mesh.height - 1) {
-              const vrows = Math.trunc((1000 - tess.numVertexes) / mesh.width), irows = Math.trunc((6000 - tess.numIndexes) / (mesh.width * 6));
-              if (vrows < 2 || irows < 1) { yield* restartSurface(); continue; }
-              const rows = Math.min(irows, vrows - 1, mesh.height - used);
-              writeGeometry({ vertices: mesh.vertices.slice(used * mesh.width, (used + rows) * mesh.width),
-                indices: mesh.indices.slice(used * (mesh.width - 1) * 6, (used + rows - 1) * (mesh.width - 1) * 6).map(index => index - used * mesh.width) }, submission.writer);
-              used += rows - 1;
-            }
-          } else {
-            const mesh = submission.mesh;
-            if (submission.dlightBeforeOverflow === true && submission.worldSurface !== undefined)
-              tess.addDlightBits(backendSurfaceDlightBits(submission.worldSurface));
-            yield* checkOverflow(mesh.vertices.length, submission.writer === "poly" ? 3 * (mesh.vertices.length - 2) : mesh.indices.length);
-            if (submission.dlightBeforeOverflow !== true && submission.worldSurface !== undefined)
-              tess.addDlightBits(backendSurfaceDlightBits(submission.worldSurface));
-            writeGeometry(mesh, submission.writer);
-          }
-        } else if (submission.kind === "entity") {
-          const entity = tess.context.entity;
-          if (entity?.kind === "sprite") {
-            const mesh = spriteGeometry(entity, tess.view.axis, tess.view.mirror);
-            yield* checkOverflow(4, 6);
-            writeGeometry(mesh, "stamp");
-          } else if (entity?.kind === "rail-core" || entity?.kind === "rail-rings" || entity?.kind === "lightning") {
-            const mesh = railGeometry(entity, tess.view.origin, resources.settings.rail);
-            for (let vertex = 0; vertex < mesh.vertices.length; vertex += 4) {
-              yield* checkOverflow(4, 6);
-              writeGeometry({ vertices: mesh.vertices.slice(vertex, vertex + 4),
-                indices: mesh.indices.slice(vertex / 4 * 6, vertex / 4 * 6 + 6).map(value => value - vertex) }, "rail");
-            }
-          } else if (entity?.kind === "beam") {
-            const positions = portalBeamPositions(entity, position => tess.projectPosition(position));
-            if (positions.length !== 0) yield { kind: "entity-beam", positions, whiteImage };
-          } else yield { kind: "entity-axis", positions: portalAxisPositions(position => tess.projectPosition(position)), whiteImage };
-        }
-      }
-      tess.setFloatTime(originalTime);
-      if (oldMaterial !== null) yield* flushSurface();
-      tess.setProjector(project);
-      if (depthHack) {
-        tess.setDepthRange([0, 1]);
-        yield { kind: "depth-range", range: tess.actualDepthRange };
-      }
-      if (resources.settings.runtime.shadows === 2 && services.target.stencilBits >= 4) {
-        tess.setActualCull("none");
-        tess.setProjector(position => transformVec4(projection, { ...position, w: 1 }));
-        yield { kind: "shadow-finish", positions: stencilShadowFinishVertices(projection), whiteImage };
-      }
-      yield { kind: "render-flares", render: depth => tess.flares.renderFlares({ ...frontend.scene,
-        inPortal: portal !== null, time: refdef.time, origin: refdef.viewOrigin, projection,
-        viewport: { x: refdef.x, y: services.target.height - refdef.y - refdef.height, width: refdef.width, height: refdef.height } },
-      settings.flares, depth, { tess, shader: flareMaterial, get identityLight() { return services.imageProfile().colorMappings.identityLight; },
-        endSurface: flushSurface, *disablePortalClip() { yield { kind: "disable-portal-clip" }; } }) };
-      };
-      const prepare = function* (executionRange: SourceDrawSortRange = drawRange): Generator<SourceRenderView, void, unknown> {
-      for (const earlier of earlierViews) yield* earlier();
-      const clipProjection: SourceClipProjection = [projection[0], projection[5], projection[10], projection[14]];
-      const clipPlane: RenderClipPlane | undefined = (refdef.renderFlags & RDF_HYPERSPACE) !== 0
-        ? { kind: "retain", projection: clipProjection }
-        : portal === null ? undefined : { kind: "portal", eyePlane: portalEyePlane(portal.plane, refdef), projection: clipProjection };
-      yield { viewport: { x: refdef.x, y: refdef.y, width: refdef.width, height: refdef.height },
-        ...(clipPlane === undefined ? {} : { clipPlane }),
-        get clear(): RenderView["clear"] {
-          const stencil = resources.settings.runtime.measureOverdraw !== 0 || resources.settings.runtime.shadows === 2;
-          const fastSky = resources.settings.runtime.fastSky !== 0 && !noWorld;
-          const gray = Math.fround((refdef.time & 255) / 255);
-          return { depth: 1, stencil, color: (refdef.renderFlags & RDF_HYPERSPACE) !== 0 ? { x: gray, y: gray, z: gray, w: 1 }
-            : fastSky ? { x: 0, y: 0, z: 0, w: 1 } : null };
+      const transport = services.worldTransport;
+      const prepare = transport === undefined ? serialPrepare : Object.assign(serialPrepare, {
+        captureThreadedView(executionRange: SourceDrawSortRange = drawRange) {
+          if (earlierViews.length !== 0) throw new Error("Collected portal views require serial diagnostic execution");
+          return transport.capture(backendView, executionRange);
         },
-        beforeView: enterView(), operations: drawView(executionRange) };
-      };
+      });
       if (submit) {
         services.target.queuePreparedViews(prepare, drawRange);
         debugGraphics();
@@ -1352,16 +988,26 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
     builtins: builtinImages,
     memoryProfile,
     tess,
+    worldBackend,
+    backendMaterials: { defaultMaterial, flareMaterial, sunMaterial },
     fonts: new RendererFontRegistry(vfs, async path => resources.picture(await resources.registerShaderNoMip(path)),
-      () => services.target.syncRenderThread()),
+      () => services.target.syncRenderThread(), services.fontGeneration === undefined ? null : {
+        ...services.fontGeneration,
+        async registerImage(name, rgba) {
+          const image = publishImage({ name, mipmap: false, allowPicmip: false, wrap: "clamp" }, { width: 256, height: 256, pixels: rgba });
+          const material = await materialRegistry.registerFromImage(name, { kind: "picture" }, image, false,
+            { whiteImage, profile: settings.registrationProfile(), smp: () => settings.runtime.smpRequested ? 1 : 0,
+              synchronize: () => services.target.syncRenderThread() });
+          return resources.picture(shaderForMaterial(material));
+        },
+      }),
     get sceneEntities() { return sceneEntities; },
     settings,
     get diagnostics() { return [...diagnostics]; },
     get worldBaseName() { return worldBaseName; },
     drawSun() {
-      services.target.executeSurfaceOperations(drawSun(tess, sunMaterial,
-        { skyRendered: skyRenderedThisView, far: backendFar, direction: sun.direction, project: backendSunProjector }, settings.runtime,
-        () => evaluateWorldSurface(tess.dlightBits, services.imageProfile().colorMappings.identityLight, noise, settings.runtime)));
+      if (services.worldTransport === undefined) services.target.executeSurfaceOperations(worldBackend.drawSun(sun.direction));
+      else services.worldTransport.drawSun(sun.direction);
     },
     clearScene: () => sceneSubmission.clearScene(),
     addRefEntity: entity => sceneSubmission.addRefEntity(entity),
@@ -1536,6 +1182,5 @@ async function createRendererResources(vfs: AssetReader & RetainedFileReader & P
     frame: view => (activeLightmaps === null ? noWorldFrame : activeLightmaps.compiled).frame(view),
     prepareFrame: view => (activeLightmaps === null ? noWorldFrame : activeLightmaps.compiled).prepareFrame(view),
   };
-  tess.bindSurfaceEvaluator((_identityLight, rendererNoise, runtime) => evaluateWorldSurface(tess.dlightBits, services.imageProfile().colorMappings.identityLight, rendererNoise, runtime));
   return resources;
 }

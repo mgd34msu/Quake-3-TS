@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { BspMap } from "../src/assets/bsp.ts";
 import { WritableFileSystem } from "../src/assets/writable-files.ts";
+import { NativeRoot } from "../src/assets/native-root.ts";
 import { FileHandleExhaustionError, SourceFileHandles } from "../src/assets/file-handles.ts";
 import type { FileHandle } from "../src/assets/file-handles.ts";
 import { vec3 } from "../src/core/math.ts";
@@ -42,8 +43,8 @@ function sharedOwner(homePath: string): { readonly files: WritableFileSystem; re
   return { files, handles };
 }
 
-function bytePath(hostRoot: string, sourcePath: string): Buffer {
-  return Buffer.concat([Buffer.from(`${hostRoot}/`), Buffer.from(sourcePath, "latin1")]);
+function bytePath(hostRoot: string | NativeRoot, sourcePath: string): Buffer {
+  return Buffer.concat([typeof hostRoot === "string" ? Buffer.from(hostRoot) : hostRoot.resolvedBytes(), Buffer.from("/"), Buffer.from(sourcePath, "latin1")]);
 }
 
 function openRead(handles: SourceFileHandles, path: string): FileHandle {
@@ -76,49 +77,49 @@ describe("Quake writable files", () => {
       const first = files.openWrite(name, false);
       if (first === null) throw new Error("Expected source byte write");
       first.write(name); first.close();
-      expect(readFileSync(bytePath(files.rootPath, name), "latin1")).toBe(name);
+      expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), name), "latin1")).toBe(name);
       expect(files.fileExists(name)).toBe(true);
     }
     const append = files.openAppend("\xe9/\xe9.cfg", false);
     if (append === null) throw new Error("Expected source byte append");
     append.write("+"); append.close();
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/\xe9.cfg"), "latin1")).toBe("\xe9/\xe9.cfg+");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/\xe9.cfg"), "latin1")).toBe("\xe9/\xe9.cfg+");
     const overwrite = files.openWrite("\xe9/\xe9.cfg", false);
     if (overwrite === null) throw new Error("Expected source byte overwrite");
     overwrite.write("new"); overwrite.close();
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/\xe9.cfg"), "latin1")).toBe("new");
-    expect(readFileSync(bytePath(files.rootPath, "\xc3\xa9/\xc3\xa9.cfg"), "latin1")).toBe("\xc3\xa9/\xc3\xa9.cfg");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/\xe9.cfg"), "latin1")).toBe("new");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xc3\xa9/\xc3\xa9.cfg"), "latin1")).toBe("\xc3\xa9/\xc3\xa9.cfg");
     expect(paths).toEqual([`write ${join(files.rootPath, "\xe9/\xe9.cfg")}`,
       `write ${join(files.rootPath, "\xc3\xa9/\xc3\xa9.cfg")}`,
       `append ${join(files.rootPath, "\xe9/\xe9.cfg")}`, `write ${join(files.rootPath, "\xe9/\xe9.cfg")}`]);
     const retained = files.openBinaryWrite("\xe9/\xe9.cfg");
     if (retained === null) throw new Error("Expected retained source byte descriptor");
-    await rename(bytePath(files.rootPath, "\xe9/\xe9.cfg"), bytePath(files.rootPath, "\xe9/retained.cfg"));
-    await writeFile(bytePath(files.rootPath, "\xe9/\xe9.cfg"), "replacement");
+    await rename(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/\xe9.cfg"), bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/retained.cfg"));
+    await writeFile(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/\xe9.cfg"), "replacement");
     retained.writeBytes(new Uint8Array([82])); retained.close();
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/retained.cfg"), "utf8")).toBe("R");
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/\xe9.cfg"), "utf8")).toBe("replacement");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/retained.cfg"), "utf8")).toBe("R");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/\xe9.cfg"), "utf8")).toBe("replacement");
     const bot = files.openBotLog("\xe9/bot.log");
     if (bot.kind !== "opened") throw new Error("Expected source byte bot log");
     expect(bot.stream.write(new Uint8Array([66]))).toEqual({ kind: "ok" });
     expect(bot.stream.close()).toEqual({ kind: "ok" });
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/bot.log"), "utf8")).toBe("B");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/bot.log"), "utf8")).toBe("B");
   });
 
   test("source byte rename, fallback copy and no-replace finalization preserve coexisting names", async () => {
     const root = await temporaryRoot(), home = join(root, "home-\u6e38\u620f");
     const { files, handles } = sharedOwner(home);
-    await mkdir(files.rootPath, { recursive: true });
-    await writeFile(bytePath(files.rootPath, "\xe9.tmp"), "raw");
-    await writeFile(bytePath(files.rootPath, "\xc3\xa9.tmp"), "utf8");
+    await mkdir(NativeRoot.fromSource(files.rootPath).resolvedBytes(), { recursive: true });
+    await writeFile(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9.tmp"), "raw");
+    await writeFile(bytePath(NativeRoot.fromSource(files.rootPath), "\xc3\xa9.tmp"), "utf8");
     const directories: string[] = [];
     files.renameFile("\xe9.tmp", "\xe9.cfg", directory => { directories.push(directory); });
-    expect(readFileSync(bytePath(files.rootPath, "\xe9.cfg"), "utf8")).toBe("raw");
-    expect(existsSync(bytePath(files.rootPath, "\xe9.tmp"))).toBe(false);
-    expect(readFileSync(bytePath(files.rootPath, "\xc3\xa9.tmp"), "utf8")).toBe("utf8");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9.cfg"), "utf8")).toBe("raw");
+    expect(existsSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9.tmp"))).toBe(false);
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xc3\xa9.tmp"), "utf8")).toBe("utf8");
     files.renameFile("\xe9.cfg", "\xe9/new/\xe9.cfg", directory => { directories.push(directory); });
-    expect(readFileSync(bytePath(files.rootPath, "\xe9/new/\xe9.cfg"), "utf8")).toBe("raw");
-    expect(existsSync(bytePath(files.rootPath, "\xe9.cfg"))).toBe(false);
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9/new/\xe9.cfg"), "utf8")).toBe("raw");
+    expect(existsSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xe9.cfg"))).toBe(false);
     expect(directories).toEqual([files.rootPath, files.rootPath]);
     const server = files.openServerBinaryWrite("\xe9/\xe9.tmp", handles.selectFree(), () => {});
     if (server === null) throw new Error("Expected source byte server write");
@@ -141,8 +142,8 @@ describe("Quake writable files", () => {
     await writeFile(bytePath(source, "\xe9.cfg"), "raw");
     await writeFile(bytePath(source, "\xc3\xa9.cfg"), "utf8");
     const files = owner(join(root, "home"));
-    files.copyFileFromCd(source, "baseq3", "\xe9.cfg", base);
-    files.copyFileFromCd(source, "baseq3", "\xc3\xa9.cfg", base);
+    files.copyFileFromCd(source, "baseq3", "\xe9.cfg", NativeRoot.fromHost(base), Buffer.from(source));
+    files.copyFileFromCd(source, "baseq3", "\xc3\xa9.cfg", NativeRoot.fromHost(base), Buffer.from(source));
     expect(readFileSync(bytePath(join(base, "baseq3"), "\xe9.cfg"), "utf8")).toBe("raw");
     expect(readFileSync(bytePath(join(base, "baseq3"), "\xc3\xa9.cfg"), "utf8")).toBe("utf8");
   });
@@ -160,12 +161,12 @@ describe("Quake writable files", () => {
     }
     for (const game of ["\xe9", "\xc3\xa9"]) {
       for (const path of ["nested/\xe9.cfg", "nested/\xc3\xa9.cfg"]) {
-        files.copyFileFromCd(join(cd, game), game, path, base, bytePath(cd, game));
+        files.copyFileFromCd(join(cd, game), game, path, NativeRoot.fromHost(base), bytePath(cd, game));
         expect(readFileSync(bytePath(base, `${game}/${path}`))).toEqual(readFileSync(bytePath(cd, `${game}/${path}`)));
       }
     }
     expect(printed).toEqual(["\xe9", "\xc3\xa9"].flatMap(game => ["nested/\xe9.cfg", "nested/\xc3\xa9.cfg"]
-      .map(path => `copy ${join(cd, game, path)} to ${join(base, game, path)}\n`)));
+      .map(path => `copy ${join(cd, game, path)} to ${join(NativeRoot.fromHost(base).sourceText, game, path)}\n`)));
   });
 
   test("native CD copying retains journal exclusion and retirement before source acquisition", async () => {
@@ -178,7 +179,7 @@ describe("Quake writable files", () => {
     const files = new WritableFileSystem({ homePath: join(root, "home"), product: "baseq3",
       print: text => { printed.push(text); } });
     owners.push(files);
-    files.copyFileFromCd(join(cd, "\xe9"), "baseq3", "journal.dat.backup", base, source);
+    files.copyFileFromCd(join(cd, "\xe9"), "baseq3", "journal.dat.backup", NativeRoot.fromHost(base), source);
     expect(printed).toEqual([`copy ${join(cd, "\xe9", "journal.dat.backup")} to ${join(base, "baseq3", "journal.dat.backup")}\n`,
       "Ignoring journal files\n"]);
     expect(existsSync(base)).toBe(false);
@@ -187,22 +188,22 @@ describe("Quake writable files", () => {
     const retiring = new WritableFileSystem({ homePath: join(root, "home"), product: "baseq3", handles,
       print: () => { handles.close(); } });
     owners.push(retiring);
-    expect(() => retiring.copyFileFromCd(join(cd, "\xe9"), "baseq3", "normal.cfg", base, source)).toThrow("closed");
+    expect(() => retiring.copyFileFromCd(join(cd, "\xe9"), "baseq3", "normal.cfg", NativeRoot.fromHost(base), source)).toThrow("closed");
     expect(existsSync(base)).toBe(false);
     expect(readFileSync(bytePath(cd, "\xe9/normal.cfg"), "utf8")).toBe("normal");
   });
 
   test("source byte symlinks reject before truncating coexisting names", async () => {
     const root = await temporaryRoot(), files = owner(join(root, "home"));
-    await mkdir(files.rootPath, { recursive: true });
+    await mkdir(NativeRoot.fromSource(files.rootPath).resolvedBytes(), { recursive: true });
     const outside = join(root, "outside.cfg");
     await writeFile(outside, "preserved");
-    await symlink(outside, bytePath(files.rootPath, "\xe9.cfg"));
-    await writeFile(bytePath(files.rootPath, "\xc3\xa9.cfg"), "other");
+    await symlink(outside, bytePath(NativeRoot.fromSource(files.rootPath), "\xe9.cfg"));
+    await writeFile(bytePath(NativeRoot.fromSource(files.rootPath), "\xc3\xa9.cfg"), "other");
     expect(() => files.openWrite("\xe9.cfg", false)).toThrow("symbolic link");
     expect(() => files.fileExists("\xe9.cfg")).toThrow("symbolic link");
     expect(readFileSync(outside, "utf8")).toBe("preserved");
-    expect(readFileSync(bytePath(files.rootPath, "\xc3\xa9.cfg"), "utf8")).toBe("other");
+    expect(readFileSync(bytePath(NativeRoot.fromSource(files.rootPath), "\xc3\xa9.cfg"), "utf8")).toBe("other");
   });
 
   test("source byte containment rejects byte-distinct moved roots before truncation", async () => {
@@ -637,7 +638,7 @@ describe("Quake writable files", () => {
     const root = await temporaryRoot();
     const { files, handles } = sharedOwner(join(root, "home"));
     const path = join(files.rootPath, "append-seek.log");
-    await mkdir(files.rootPath, { recursive: true });
+    await mkdir(NativeRoot.fromSource(files.rootPath).resolvedBytes(), { recursive: true });
     await writeFile(path, "first");
     const handle = handles.selectFree(), log = files.openAppend("append-seek.log", true);
     if (log === null) throw new Error("Expected actual append file");

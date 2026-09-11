@@ -25,6 +25,8 @@ import type { FileHandle, FileSeekOrigin, WriteFileLifetime } from "./file-handl
 import type { BotLogIoResult, BotLogOpenResult } from "../botlib/log.ts";
 import { checkedGameDirectory, openLooseDescriptor } from "./vfs.ts";
 import { CommonError } from "../core/common-error.ts";
+import { hostRootInput, NativeRoot } from "./native-root.ts";
+import type { RootInput } from "./native-root.ts";
 
 export interface WritableLog {
   write(text: string): void;
@@ -39,7 +41,8 @@ export interface WritableBinaryFile {
 }
 
 export interface WritableFileSystemOptions {
-  readonly homePath: string | (() => string);
+  /** Plain strings at this external constructor are host Unicode. */
+  readonly homePath: RootInput | (() => RootInput);
   readonly product: Product;
   readonly print: (text: string) => undefined;
   readonly handles?: SourceFileHandles;
@@ -105,7 +108,7 @@ interface ServerParent { readonly descriptor: number; readonly filename: string 
 type AcquisitionMode = "append" | "truncate" | "exclusive" | "bot-log";
 type WritableScope = { readonly kind: "product" }
   | { readonly kind: "server"; readonly file: FileHandle; beforeOpen(): void };
-type AcquisitionScope = WritableScope | { readonly kind: "directory"; readonly basePath: string; readonly gameDirectory: string };
+type AcquisitionScope = WritableScope | { readonly kind: "directory"; readonly basePath: NativeRoot; readonly gameDirectory: string };
 
 function unavailable(acquisition: FileAcquisition | undefined, error: unknown, expected = isPlatformFileFailure(error)): null {
   acquisition?.fail(error, expected);
@@ -271,7 +274,7 @@ class OpenWritableLog implements WritableLog, WritableBinaryFile {
 }
 
 export class WritableFileSystem {
-  private readonly homePathSource: WritableFileSystemOptions["homePath"];
+  private readonly homePathSource: NativeRoot | (() => RootInput);
   private gameDirectory: string;
   private readonly print: (text: string) => undefined;
   private readonly handles: SourceFileHandles;
@@ -280,7 +283,7 @@ export class WritableFileSystem {
   private readonly openLogs = new Set<OpenWritableLog | BufferedLog>();
 
   constructor(options: WritableFileSystemOptions) {
-    this.homePathSource = options.homePath;
+    this.homePathSource = typeof options.homePath === "function" ? options.homePath : hostRootInput(options.homePath);
     this.homePath;
     this.gameDirectory = options.product;
     this.print = options.print;
@@ -289,18 +292,18 @@ export class WritableFileSystem {
     this.beforeProductOpen = options.beforeProductOpen;
   }
 
-  private get homePath(): string {
-    const path = typeof this.homePathSource === "string" ? this.homePathSource : this.homePathSource();
-    if (path.includes("\0")) throw new RangeError("Writable home path contains NUL");
-    return resolve(path === "" ? "/" : path);
+  private get homeRoot(): NativeRoot {
+    return typeof this.homePathSource === "function" ? hostRootInput(this.homePathSource()) : this.homePathSource;
   }
 
+  private get homePath(): string { return this.homeRoot.resolvedBytes().toString("latin1"); }
+
   /** FS_CopyFile uses temporary descriptors, leaving the caller's source handle and cursor intact. */
-  copyFileFromCd(sourceDirectory: string, game: string, path: string, basePath: string,
-    nativeSourceDirectory: Buffer = Buffer.from(sourceDirectory)): void {
+  copyFileFromCd(sourceDirectory: string, game: string, path: string, basePath: NativeRoot,
+    nativeSourceDirectory: Buffer): void {
     this.handles.assertActive();
     const relativePath = checkedRelativePath(path), gameDirectory = checkedGameDirectory(game);
-    const fromPath = join(sourceDirectory, relativePath), toPath = join(basePath, gameDirectory, relativePath);
+    const fromPath = join(sourceDirectory, relativePath), toPath = join(basePath.resolvedBytes().toString("latin1"), gameDirectory, relativePath);
     this.print(`copy ${fromPath} to ${toPath}\n`);
     this.handles.assertActive();
     if (fromPath.includes("journal.dat") || fromPath.includes("journaldata.dat")) {
@@ -348,6 +351,7 @@ export class WritableFileSystem {
     return bytes.byteLength;
   }
 
+  /** Resolved source-byte spelling for diagnostics, not host Unicode. */
   get rootPath(): string { return resolve(this.homePath, this.gameDirectory); }
 
   setGameDirectory(game: string): void {
@@ -417,10 +421,10 @@ export class WritableFileSystem {
   }
 
   /** Unix QGL owns the returned FILE across FS_Shutdown, outside all common handles/logs. */
-  openGlLog(basePath: string): WritableLog | null {
+  openGlLog(basePath: NativeRoot): WritableLog | null {
     this.handles.assertActive();
     const opened = this.acquireFile("gl.log", "truncate", undefined,
-      { kind: "directory", basePath: basePath === "" ? "/" : basePath, gameDirectory: "." });
+      { kind: "directory", basePath, gameDirectory: "." });
     if (opened === null) return null;
     let log: BufferedLog;
     try { log = new BufferedLog(opened.descriptor, opened.path, () => {}); }
@@ -454,18 +458,18 @@ export class WritableFileSystem {
   }
 
   renameFile(from: string, to: string, beforeRename: (directory: string) => void): void {
-    this.renameRelative(from, to, this.homePath, this.gameDirectory, beforeRename);
+    this.renameRelative(from, to, this.homeRoot, this.gameDirectory, beforeRename);
   }
 
   renameServerFile(from: string, to: string, beforeRename: (directory: string) => void): void {
-    this.renameRelative(from, to, this.homePath, "", beforeRename);
+    this.renameRelative(from, to, this.homeRoot, "", beforeRename);
   }
 
   /** FS_Rename/FS_SV_Rename overwrite first, then copy and remove on ordinary OS failure. */
-  private renameRelative(from: string, to: string, homePath: string, gameDirectory: string, beforeRename: (directory: string) => void): void {
+  private renameRelative(from: string, to: string, homeRoot: NativeRoot, gameDirectory: string, beforeRename: (directory: string) => void): void {
     this.handles.assertActive();
     const fromRelative = checkedRelativePath(from), toRelative = checkedRelativePath(to);
-    const directory = resolve(homePath, gameDirectory);
+    const directory = resolve(homeRoot.resolvedBytes().toString("latin1"), gameDirectory);
     const fromPath = join(directory, fromRelative), toPath = join(directory, toRelative);
     beforeRename(directory);
     this.handles.assertActive();
@@ -473,7 +477,7 @@ export class WritableFileSystem {
       this.print(`copy ${fromPath} to ${toPath}\n`);
       this.handles.assertActive();
     };
-    const home = this.openHomeDirectory(undefined, false, homePath);
+    const home = this.openHomeDirectory(undefined, false, homeRoot);
     const root = home === null || gameDirectory === "" ? home
       : this.openChildReplacingParent(home, Buffer.from(gameDirectory, "latin1"), directory, undefined, false);
     if (root === null) { copyNotice(); return; }
@@ -671,8 +675,8 @@ export class WritableFileSystem {
     if (mode === "append") this.handles.setName(handle, path);
     if (scope.kind === "product" && mode === "append") this.clearSoundBuffer?.();
     const directory: AcquisitionScope = scope.kind === "product"
-      ? { kind: "directory", basePath: this.homePath, gameDirectory: this.gameDirectory } : scope;
-    if (directory.kind === "directory") this.beforeProductOpen?.(resolve(directory.basePath, directory.gameDirectory, relativePath),
+      ? { kind: "directory", basePath: this.homeRoot, gameDirectory: this.gameDirectory } : scope;
+    if (directory.kind === "directory") this.beforeProductOpen?.(resolve(directory.basePath.resolvedBytes().toString("latin1"), directory.gameDirectory, relativePath),
       mode === "append" ? "append" : "write");
     const opened = this.acquireFile(relativePath, mode, undefined, directory);
     if (opened === null) return null;
@@ -700,7 +704,8 @@ export class WritableFileSystem {
     if (relativePath === "." || relativePath.endsWith("/") || relativePath.endsWith("/.")) {
       return unavailable(acquisition, new Error(`Writable target names a directory: ${path}`), true);
     }
-    const basePath = scope.kind === "directory" ? resolve(scope.basePath) : this.homePath;
+    const baseRoot = scope.kind === "directory" ? scope.basePath : this.homeRoot;
+    const basePath = baseRoot.resolvedBytes().toString("latin1");
     const gameDirectory = scope.kind === "directory" ? scope.gameDirectory : this.gameDirectory;
     const rootPath = scope.kind === "server" ? basePath : resolve(basePath, gameDirectory);
     const targetPath = resolve(rootPath, relativePath);
@@ -714,7 +719,7 @@ export class WritableFileSystem {
     const filename = components.pop();
     if (filename === undefined) return unavailable(acquisition, new Error(`Writable path has no filename: ${path}`), true);
 
-    const homeDescriptor = this.openHomeDirectory(acquisition, true, basePath);
+    const homeDescriptor = this.openHomeDirectory(acquisition, true, baseRoot);
     if (homeDescriptor === null) return null;
     const rootDescriptor = scope.kind === "server" ? homeDescriptor
       : this.openChildReplacingParent(homeDescriptor, Buffer.from(gameDirectory, "latin1"), rootPath, acquisition);
@@ -882,7 +887,7 @@ export class WritableFileSystem {
     return writeSync(descriptor, bytes, offset, length, position);
   }
 
-  private openHomeDirectory(acquisition: FileAcquisition | undefined, create = true, basePath = this.homePath): number | null {
+  private openHomeDirectory(acquisition: FileAcquisition | undefined, create = true, baseRoot = this.homeRoot): number | null {
     let descriptor: number | null;
     try {
       descriptor = openSync(
@@ -894,10 +899,10 @@ export class WritableFileSystem {
     }
 
     let directoryPath = "/";
-    const components = basePath.split("/").filter(component => component.length > 0);
+    const components = baseRoot.resolvedBytes().toString("latin1").split("/").filter(component => component.length > 0);
     for (const component of components) {
       directoryPath = join(directoryPath, component);
-      descriptor = this.openChildReplacingParent(descriptor, Buffer.from(component), directoryPath, acquisition, create);
+      descriptor = this.openChildReplacingParent(descriptor, Buffer.from(component, "latin1"), directoryPath, acquisition, create);
       if (descriptor === null) return null;
     }
     return descriptor;

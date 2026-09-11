@@ -33,11 +33,33 @@ export interface BotMovementHost {
 export type BotMovementVariableName = "svMaxStep" | "svMaxBarrier" | "svGravity" | "rocketLauncherIndex"
   | "bfgIndex" | "grappleIndex" | "missileEntityType" | "offhandGrapple" | "grappleOnCommand" | "grappleOffCommand";
 
+export interface BotMovementDebugOptions {
+  readonly debug?: boolean;
+  readonly aiMove?: boolean;
+  readonly elevator?: boolean;
+  readonly funcBob?: boolean;
+  readonly grapple?: boolean;
+  clearLines(): void;
+  printTravelType(type: number): void;
+  showReachability(reach: AasReachability): void;
+  lineCreate(): number;
+  lineShow(line: number, start: Vec3, end: Vec3, color: number): void;
+}
+export class BotMovementDebugState {
+  grappleLine = 0;
+}
+
 /** Borrowed services for the travel modules, created only by the movement owner. */
 export interface BotTravelContext {
   readonly routing: BotMovementRouting;
   readonly actions: BotActionBuffer;
   readonly host: BotMovementHost;
+  readonly diagnostics?: {
+    readonly elevator: boolean;
+    readonly funcBob: boolean;
+    readonly grapple: boolean;
+    showGrapple(reach: AasReachability): void;
+  };
   variable(name: BotMovementVariableName): BotMoveVariable;
   vectorToAngles(direction: Vec3): Vec3;
   gapDistance(origin: Vec3, horizontalDirection: Vec3, entity: number): number;
@@ -93,8 +115,16 @@ export function movementIntersection(first: Vec2, second: Vec2, third: Vec2, fou
 export class BotMovement {
   private readonly context: BotTravelContext;
 
-  constructor(readonly routing: BotMovementRouting, readonly actions: BotActionBuffer, readonly host: BotMovementHost) {
+  constructor(readonly routing: BotMovementRouting, readonly actions: BotActionBuffer, readonly host: BotMovementHost,
+    private readonly diagnostics?: BotMovementDebugOptions, debugState = new BotMovementDebugState()) {
     this.context = { routing, actions, host, variable: name => this.variable(name), vectorToAngles,
+      ...(diagnostics === undefined ? {} : { diagnostics: {
+        elevator: diagnostics.elevator === true, funcBob: diagnostics.funcBob === true, grapple: diagnostics.grapple === true,
+        showGrapple: (reach: AasReachability) => {
+          if (debugState.grappleLine === 0) debugState.grappleLine = diagnostics.lineCreate();
+          diagnostics.lineShow(debugState.grappleLine, reach.start, reach.end, 3);
+        },
+      } }),
       gapDistance: (origin, direction, entity) => this.gapDistance(origin, direction, entity),
       checkBarrierJump: (state, direction, speed) => this.checkBarrierJump(state, direction, speed),
       checkBlocked: (state, direction, bottom, result) => this.checkBlocked(state, direction, bottom, result),
@@ -303,7 +333,10 @@ export class BotMovement {
 
   private *moveStateToGoal(result: BotMoveResult, state: BotMoveState, goal: BotGoal | null, travelFlags: number): CallSteps<undefined> {
     yield* resetGrappleCalls(this.context, state);
-    if (goal === null) { result.failure = true; return; }
+    if (goal === null) {
+      if (this.diagnostics?.debug) this.routing.states.host.print(1, `client ${state.client}: movetogoal -> no goal\n`);
+      result.failure = true; return;
+    }
     const spatial = this.routing.spatial, movement = spatial.movement;
     state.moveFlags &= ~(BotMoveFlag.SWIMMING | BotMoveFlag.AGAINSTLADDER);
     if (movement.onGround(state.origin, state.presenceType, state.entityNum)) state.moveFlags |= BotMoveFlag.ONGROUND;
@@ -354,27 +387,58 @@ export class BotMovement {
           // Both source operands test FUNCBOB. Elevator is intentionally not included.
           if ((result.flags & BotMoveResultFlag.ONTOPOF_FUNCBOB) !== 0) state.reachabilityTime = f(f(this.routing.states.host.time()) + 5);
           if (state.area === reach.area || state.reachabilityTime < f(this.routing.states.host.time())) number = 0;
-        } else if (state.lastGoalArea !== goal.area || state.reachabilityTime < f(this.routing.states.host.time()) || state.lastArea !== state.area) number = 0;
+        } else {
+          if (this.diagnostics?.debug && this.host.developer() && state.reachabilityTime < f(this.routing.states.host.time())) {
+            this.routing.states.host.print(1, `client ${state.client}: reachability timeout in `);
+            this.diagnostics.printTravelType(reach.travelType & TravelType.MASK);
+            this.routing.states.host.print(1, "\n");
+          }
+          if (state.lastGoalArea !== goal.area || state.reachabilityTime < f(this.routing.states.host.time()) || state.lastArea !== state.area) number = 0;
+        }
       }
       let resultFlags = 0;
       if (number === 0) {
-        this.areaReachability(state.area);
+        if (this.areaReachability(state.area) === 0 && this.diagnostics?.debug && this.host.developer()) {
+          this.routing.states.host.print(1, `area ${state.area} no reachability\n`);
+        }
         const selected = this.routing.getReachabilityToGoal({ origin: state.origin, area: state.area,
           lastGoalArea: state.lastGoalArea, lastArea: state.lastArea, avoid: state, goal, travelFlags,
           moveTravelFlags: travelFlags, avoidSpots: state.avoidSpots, numAvoidSpots: state.numAvoidSpots, flags: 0 });
         number = selected.reachability; resultFlags = selected.flags;
         state.reachArea = state.area; state.jumpReach = 0; state.moveFlags &= ~BotMoveFlag.GRAPPLERESET;
+        let selectedArea = 0;
         if (number !== 0) {
-          state.reachabilityTime = f(f(this.routing.states.host.time()) + this.reachabilityTime(this.reachability(number)));
+          const now = f(this.routing.states.host.time());
+          const reach = this.reachability(number);
+          selectedArea = reach.area;
+          state.reachabilityTime = f(now + this.reachabilityTime(reach));
           this.routing.states.addToAvoidReach(state, number, 6);
+        }
+        if (this.diagnostics?.debug) {
+          if (number === 0 && this.host.developer()) this.routing.states.host.print(1, "goal not reachable\n");
+          if (this.host.developer() && state.lastGoalArea === goal.area && state.lastArea === selectedArea) {
+            this.routing.states.host.print(1, "same goal, going back to previous area\n");
+          }
         }
       }
       state.lastReachability = number; state.lastGoalArea = goal.area; state.lastArea = state.area;
+      let usedTravelType = 0;
       if (number !== 0) {
         const reach = this.reachability(number); result.travelType = reach.travelType;
+        usedTravelType = reach.travelType;
+        if (this.diagnostics?.aiMove) {
+          this.diagnostics.clearLines();
+          this.diagnostics.printTravelType(reach.travelType & TravelType.MASK);
+          this.diagnostics.showReachability(reach);
+        }
         const moved = yield* this.travel(state, reach, false); if (moved !== null) copyMoveResult(result, moved);
         result.travelType = reach.travelType; result.flags |= resultFlags;
       } else { result.failure = true; result.flags |= resultFlags; }
+      if (this.diagnostics?.debug && this.host.developer() && result.failure) {
+        this.routing.states.host.print(1, `client ${state.client}: movement failure in `);
+        this.diagnostics.printTravelType(usedTravelType & TravelType.MASK);
+        this.routing.states.host.print(1, "\n");
+      }
     } else {
       let foundJumpPad = false;
       const end = ma(state.origin, f(-2 * state.thinkTime), state.velocity), areas = spatial.traceAreas(state.origin, end, 16);
@@ -396,6 +460,11 @@ export class BotMovement {
         const reach = this.reachability(state.lastReachability); result.travelType = reach.travelType;
         const moved = yield* this.travel(state, reach, true); if (moved !== null) copyMoveResult(result, moved);
         result.travelType = reach.travelType;
+        if (this.diagnostics?.debug && this.host.developer() && result.failure) {
+          this.routing.states.host.print(1, `client ${state.client}: movement failure in finish `);
+          this.diagnostics.printTravelType(reach.travelType & TravelType.MASK);
+          this.routing.states.host.print(1, "\n");
+        }
       }
     }
     if (result.blocked) state.reachabilityTime = f(state.reachabilityTime - f(10 * state.thinkTime));

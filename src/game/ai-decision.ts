@@ -164,7 +164,10 @@ export function botGetItemLongTermGoal(context: GameAiContext, state: BotState, 
   if (state.ltgTime < context.time) {
     context.library.goals.popGoal(state.gs);
     if (context.library.goals.chooseLTGItem(state.gs, state.origin, state.inventory, flags)) state.ltgTime = f(context.time + 20);
-    else { context.library.goals.resetAvoidGoals(state.gs); context.library.moveStates.resetAvoidReach(state.ms); }
+    else {
+      if (context.library.debugBuild) context.game.options.engine.print(`${clientName(context, state.client, 128)}: no valid ltg (probably stuck)\n`);
+      context.library.goals.resetAvoidGoals(state.gs); context.library.moveStates.resetAvoidReach(state.ms);
+    }
     const next = context.library.goals.getTopGoal(state.gs);
     if (next === null) return false;
     goal.copyFrom(next);
@@ -758,7 +761,10 @@ export function aiNodeSeekActivateEntity(context: GameAiContext, state: BotState
   const result = new BotMoveResult();
   if (targetVisible) {
     const info = botEntityInfo(context, goal.entity);
-    if (activation.origin.x !== info.origin.x || activation.origin.y !== info.origin.y || activation.origin.z !== info.origin.z) activation.time = 0;
+    if (activation.origin.x !== info.origin.x || activation.origin.y !== info.origin.y || activation.origin.z !== info.origin.z) {
+      if (context.library.debugBuild) context.game.options.engine.print("hit shootable button or trigger\n");
+      activation.time = 0;
+    }
     if (activation.time < context.time) {
       botPopFromActivateGoalStack(context, state);
       if (state.activateStack !== null) { state.activateStack.time = f(context.time + 10); return false; }
@@ -766,7 +772,10 @@ export function aiNodeSeekActivateEntity(context: GameAiContext, state: BotState
       return false;
     }
   } else {
-    if (!activation.shoot && touchingGoal(state.origin, goal)) activation.time = 0;
+    if (!activation.shoot && touchingGoal(state.origin, goal)) {
+      if (context.library.debugBuild) context.game.options.engine.print("touched button or trigger\n");
+      activation.time = 0;
+    }
     if (activation.time < context.time) {
       botPopFromActivateGoalStack(context, state);
       if (state.activateStack !== null) { state.activateStack.time = f(context.time + 10); return false; }
@@ -929,7 +938,7 @@ function rememberEnemyPosition(context: GameAiContext, state: BotState, origin: 
 
 export function aiNodeBattleFight(context: GameAiContext, state: BotState): boolean {
   if (checkLifecycle(context, state, "battle fight")) return false;
-  botFindEnemy(context, state, state.enemy);
+  if (botFindEnemy(context, state, state.enemy) && context.library.debugBuild) context.game.options.engine.print("found new better enemy\n");
   if (state.enemy < 0) { aiEnterSeekLtg(context, state, "battle fight: no enemy"); return false; }
   const info = botEntityInfo(context, state.enemy);
   if (state.enemyDeathTime !== 0) {
@@ -1044,7 +1053,7 @@ export function aiNodeBattleRetreat(context: GameAiContext, state: BotState): bo
   if (state.enemy < 0) { aiEnterSeekLtg(context, state, "battle retreat: no enemy"); return false; }
   const info = botEntityInfo(context, state.enemy);
   if (entityIsDead(context, info)) { aiEnterSeekLtg(context, state, "battle retreat: enemy dead"); return false; }
-  botFindEnemy(context, state, state.enemy);
+  if (botFindEnemy(context, state, state.enemy) && context.library.debugBuild) context.game.options.engine.print("found new better enemy\n");
   setTravelFlags(context, state, false);
   botMapScripts(context, state);
   botUpdateBattleInventory(context, state, state.enemy);

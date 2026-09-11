@@ -143,6 +143,7 @@ export class AasReachabilitySpecial {
         reach.travelType |= this.travelFlagsForTeam(entity);
         reach.travelTime = settings.teleportTime;
         this.link(link.area, reach);
+        this.context.debugState.count("teleport");
       }
       spatial.unlinkFromAreas(areas);
     }
@@ -151,8 +152,10 @@ export class AasReachabilitySpecial {
   elevator(): void {
     const { bspEntities, spatial, world, settings, print } = this.context;
     const classnameBuffer = new Uint8Array(MAX_EPAIRKEY), modelBuffer = new Uint8Array(MAX_EPAIRKEY);
+    if (this.context.debugState.profile.reachDebug) this.context.log("AAS_Reachability_Elevator\r\n");
     for (let entity = bspEntities.nextEntity(0); entity !== 0; entity = bspEntities.nextEntity(entity)) {
       if (!bspEntities.value(entity, "classname", classnameBuffer) || epairText(classnameBuffer) !== "func_plat") continue;
+      if (this.context.debugState.profile.reachDebug) this.context.log("found func plat\r\n");
       if (!bspEntities.value(entity, "model", modelBuffer)) { print(3, "func_plat without model\n"); continue; }
       const modelNumber = nativeAtoi(epairText(modelBuffer).slice(1));
       if (modelNumber <= 0) { print(3, "func_plat with invalid model number\n"); continue; }
@@ -215,6 +218,8 @@ export class AasReachabilitySpecial {
             reach.travelTime = f(settings.startElevatorTime + f(f(height * 100) / speed));
             this.link(area1, reach);
             n = 9999;
+            if (this.context.debugState.profile.reachDebug) this.context.log(`elevator reach from ${area1} to ${area2}\r\n`);
+            this.context.debugState.count("elevator");
           }
         }
       }
@@ -317,7 +322,9 @@ export class AasReachabilitySpecial {
               : (sourceInt(moveEnd[axis]) << 16) | (sourceInt(moveStart[axis]) & 0xffff);
             reach.face = (spawnFlags << 16) | modelNumber; reach.start = startReach.start; reach.end = endReach.end;
             reach.travelType = TravelType.FUNCBOB; reach.travelType |= this.travelFlagsForTeam(entity);
-            reach.travelTime = settings.funcBobTime; this.link(startReach.area, reach);
+            reach.travelTime = settings.funcBobTime;
+            this.context.debugState.count("funcbob");
+            this.link(startReach.area, reach);
           }
         }
         for (let link = starts; link !== null;) { const next = link.next; this.context.free(link); link = next; }
@@ -370,6 +377,7 @@ export class AasReachabilitySpecial {
             reach.start = start; reach.end = move.end; reach.travelType = TravelType.JUMPPAD;
             reach.travelType |= this.travelFlagsForTeam(entity); reach.travelTime = settings.jumpPadTime;
             this.link(link.area, reach);
+            this.context.debugState.count("jumppad");
           }
         }
       }
@@ -409,6 +417,7 @@ export class AasReachabilitySpecial {
             reach.start = start; reach.end = faceCenter; reach.travelType = TravelType.JUMPPAD;
             reach.travelType |= this.travelFlagsForTeam(entity); reach.travelTime = settings.airControlledJumpPadTime;
             this.link(link.area, reach);
+            this.context.debugState.count("jumppad");
           }
         }
       }
@@ -453,6 +462,7 @@ export class AasReachabilitySpecial {
       reach.area = destinationArea; reach.face = faceNumber; reach.edge = 0; reach.start = areaStart; reach.end = bspTrace.end;
       reach.travelType = TravelType.GRAPPLEHOOK; reach.travelTime = settings.startGrappleTime + length3(sub3(reach.end, reach.start)) * 0.25;
       this.link(from, reach);
+      this.context.debugState.count("grapple");
     }
     return false;
   }
@@ -516,6 +526,7 @@ export class AasReachabilitySpecial {
       reach.area = to; reach.face = 0; reach.edge = 0; reach.start = start; reach.end = faceCenter;
       reach.travelType = TravelType.ROCKETJUMP; reach.travelTime = settings.rocketJumpTime;
       this.link(from, reach);
+      this.context.debugState.count("rocketjump");
       return true;
     }
     return false;

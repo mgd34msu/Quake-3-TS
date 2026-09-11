@@ -16,6 +16,7 @@ const MAX_SOURCE_PATH = 64;
 
 export interface BotScriptReader extends IncludeResolver {
   readonly globals: ScriptGlobalDefines;
+  readonly debugEval?: ((text: string) => void) | undefined;
   resolveRoot(path: string): ScriptSource | undefined;
 }
 
@@ -41,6 +42,7 @@ export class BotScriptSources implements BotScriptReader {
     private readonly print: (severity: 2 | 3, text: string) => undefined,
     private readonly commonPrint: (text: string) => undefined,
     private readonly memory: ScriptMemory = new BotMemory(),
+    readonly debugEval?: (text: string) => void,
   ) {}
 
   /** Bot consumers pair PC_SetBaseFolder("botfiles") with LoadSourceFile. */
@@ -79,6 +81,7 @@ export class BotScriptSources implements BotScriptReader {
     if (root === undefined) return 0;
     const source = ScriptSourceReader.open(root, this, {
       globals: this.globals,
+      ...(this.debugEval === undefined ? {} : { debugEval: this.debugEval }),
       report: diagnostic => {
         this.requireLive();
         this.print(diagnostic.severity === "warning" ? 2 : 3,

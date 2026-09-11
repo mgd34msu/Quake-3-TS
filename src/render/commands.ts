@@ -20,6 +20,7 @@ import type { RendererFrameTimings, RendererPerformanceCounters } from "./perfor
 import type { SourceBackendMemory } from "./backend-memory.ts";
 import type { SourceDrawSortRange } from "./draw-sort.ts";
 import { SOURCE_COMMAND_RELEASE32, SOURCE_RENDER_COMMAND, SourceCommandMemory } from "./command-memory.ts";
+import type { WorldBackendView } from "./world-backend.ts";
 
 export type ResolvedTextureOperation =
   | { readonly kind: "bind-image"; readonly image: RendererImage }
@@ -82,25 +83,45 @@ export interface RenderCommandOptions {
   readonly performanceClock?: PictureClock;
   readonly performance?: RendererPerformanceCounters;
   readonly temporaryMemory?: Pick<HunkArena, "allocateTemp" | "freeTemp">;
+  readonly temporaryBuffer?: (bytes: number) => { readonly bytes: Uint8Array; release(): undefined };
   readonly commandStorage?: RendererCommandStorage;
   readonly identityLight: number;
   readonly tess: SourceTessState;
   readonly runtime: RendererRuntimeSettings;
   readonly print: (text: string) => undefined;
+  readonly thread?: RendererCommandThread;
 }
 export interface SubmissionReceipt { readonly commands: number; readonly views: number; readonly batches: number }
 interface Counts { commands: number; views: number; batches: number }
-export type SourcePreparedViews = (drawSurfs?: SourceDrawSortRange) => Iterable<SourceRenderView, unknown, unknown>;
-type CommandReference =
-  | { readonly kind: "screenshot"; readonly command: ScreenshotCommand }
+export type SourcePreparedViews = ((drawSurfs?: SourceDrawSortRange) => Iterable<SourceRenderView, unknown, unknown>) & {
+  readonly captureThreadedView?: (drawSurfs?: SourceDrawSortRange) => WorldBackendView;
+};
+export type RendererCommandReference =
+  | { readonly kind: "screenshot"; readonly command: Pick<ScreenshotCommand, "execute"> }
   | { readonly kind: "resolving-stretch-pic" }
   | { readonly kind: "stretch-pic"; readonly picture: PictureAsset }
   | { readonly kind: "prepared-views"; readonly execute: SourcePreparedViews; readonly drawSurfs: SourceDrawSortRange | null }
   | { readonly kind: "view"; readonly view: RenderView }
   | { readonly kind: "swap-buffers"; readonly present: (() => undefined) | null };
+type CommandReference = RendererCommandReference;
+export interface IssuedRendererCommands {
+  readonly bytes: Uint8Array;
+  readonly references: readonly { readonly offset: number; readonly reference: RendererCommandReference }[];
+  readonly smpFrame: 0 | 1;
+  readonly beginFrame: boolean;
+  readonly identityLight: number;
+  readonly resetPerformanceCounters: boolean;
+}
+export interface RendererCommandThread {
+  beforeIssue(): void;
+  synchronize(): void;
+  issue(commands: IssuedRendererCommands): SubmissionReceipt;
+  stretchRaw(rect: Rect2D, call: PreparedUiRawCall): undefined;
+  endRegistration(): undefined;
+}
 type PendingCommand =
   | { readonly kind: "draw-buffer"; readonly buffer: RendererDrawBuffer }
-  | { readonly kind: "screenshot"; readonly command: ScreenshotCommand; readonly source: SourceScreenshotParameters }
+  | { readonly kind: "screenshot"; readonly command: Pick<ScreenshotCommand, "execute">; readonly source: SourceScreenshotParameters }
   | { readonly kind: "set-color"; readonly color: Vec4 }
   | { readonly kind: "resolving-stretch-pic" }
   | { readonly kind: "stretch-pic"; readonly rect: Rect2D; readonly uv: TextureRect; readonly picture: PictureAsset }
@@ -409,6 +430,7 @@ export class RenderCommandBuffer {
   readonly performance: RendererPerformanceCounters;
   private readonly performanceClock: PictureClock;
   private readonly temporaryMemory: Pick<HunkArena, "allocateTemp" | "freeTemp"> | null;
+  private readonly temporaryBuffer: RenderCommandOptions["temporaryBuffer"];
   private timings: RendererFrameTimings = { frontEndMsec: 0, backEndMsec: 0 };
   private readonly commandStorage: RendererCommandStorage;
   private readonly profiles = new Map<CoordinateSpace, Draw2D>();
@@ -418,14 +440,18 @@ export class RenderCommandBuffer {
   private options: RenderCommandOptions;
   private color: Vec4 = { x: 0, y: 0, z: 0, w: 0 };
   private finishCalled = false;
+  private threadFrameStart = false;
+  private readonly thread: RendererCommandThread | null;
   private closed = false;
   constructor(readonly target: RenderTarget, options: RenderCommandOptions) {
     const data = dataOf(target); idle(data);
     unclaimed(data);
     const { clock, identityLight, tess, runtime, print } = options;
     this.performance = options.performance ?? tess.performance;
+    this.thread = options.thread ?? null;
     this.performanceClock = options.performanceClock ?? clock;
     this.temporaryMemory = options.temporaryMemory ?? null;
+    this.temporaryBuffer = options.temporaryBuffer;
     this.commandStorage = options.commandStorage ?? new RendererCommandStorage(() => tess.frontEndMemory, "isolated");
     if (this.performance !== tess.performance) throw new Error("Render commands require their tessellation performance counters");
     if (!Number.isFinite(identityLight) || identityLight < 0 || identityLight > 1) throw new RangeError("Invalid identity light");
@@ -435,7 +461,7 @@ export class RenderCommandBuffer {
     data.queue = { kind: "claimed", discard: () => { this.discard(); this.closed = true; },
       executeSurfaceOperations: operations => this.executeSurfaceOperations(operations),
       queuePreparedViews: (prepare, drawSurfs) => this.addPreparedViews(prepare, drawSurfs),
-      fixShaderSort: newShader => this.fixShaderSort(newShader), syncRenderThread: () => { this.submit(); } };
+      fixShaderSort: newShader => this.fixShaderSort(newShader), syncRenderThread: () => { this.submit(); this.thread?.synchronize(); } };
   }
   private active(): TargetData {
     const data = dataOf(this.target); idle(data);
@@ -456,7 +482,7 @@ export class RenderCommandBuffer {
     if (!Number.isFinite(identityLight) || identityLight < 0 || identityLight > 1) throw new RangeError("Invalid identity light");
     this.options = { ...this.options, identityLight: f(identityLight) };
   }
-  beginFrame(): void { this.active(); this.finishCalled = false; }
+  beginFrame(): void { this.active(); this.finishCalled = false; this.threadFrameStart = true; }
   drawBuffer(buffer: RendererDrawBuffer): void {
     this.active();
     const memory = this.commandMemory(), offset = memory.reserve(SOURCE_COMMAND_RELEASE32.drawBufferBytes);
@@ -468,6 +494,7 @@ export class RenderCommandBuffer {
   /** RE_BeginFrame changes stencil state only after R_SyncRenderThread. */
   setOverdrawMeasurement(enabled: boolean): undefined {
     this.submit();
+    this.thread?.synchronize();
     const data = this.active();
     execute(data, () => {
       for (const backend of data.backends) invoke(data, backend, value => value.setOverdrawMeasurement, [enabled]);
@@ -864,18 +891,66 @@ export class RenderCommandBuffer {
     const end = invoke(data, this.performanceClock, value => value.milliseconds, []);
     this.performance.backEnd.msec = (end - start) | 0;
   }
+  private captureIssued(commands: SourceCommandMemory<CommandReference>, smpFrame: 0 | 1,
+    resetPerformanceCounters: boolean): IssuedRendererCommands {
+    const data = commands.data();
+    const bytes = new Uint8Array(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    const references: { readonly offset: number; readonly reference: RendererCommandReference }[] = [];
+    for (let offset = 0; offset < SOURCE_COMMAND_RELEASE32.capacity;) {
+      const kind = data.getInt32(offset, true);
+      let size: number;
+      switch (kind) {
+        case SOURCE_RENDER_COMMAND.setColor: size = SOURCE_COMMAND_RELEASE32.setColorBytes; break;
+        case SOURCE_RENDER_COMMAND.stretchPic: size = SOURCE_COMMAND_RELEASE32.stretchPicBytes; break;
+        case SOURCE_RENDER_COMMAND.drawSurfs: size = SOURCE_COMMAND_RELEASE32.drawSurfsBytes; break;
+        case SOURCE_RENDER_COMMAND.drawBuffer: size = SOURCE_COMMAND_RELEASE32.drawBufferBytes; break;
+        case SOURCE_RENDER_COMMAND.swapBuffers: size = SOURCE_COMMAND_RELEASE32.swapBuffersBytes; break;
+        case SOURCE_RENDER_COMMAND.screenshot: size = SOURCE_COMMAND_RELEASE32.screenshotBytes; break;
+        default: return { bytes, references, smpFrame, beginFrame: this.threadFrameStart,
+          identityLight: this.options.identityLight, resetPerformanceCounters };
+      }
+      const reference = commands.reference(offset);
+      if (reference !== undefined) references.push({ offset, reference });
+      offset += size;
+    }
+    return { bytes, references, smpFrame, beginFrame: this.threadFrameStart,
+      identityLight: this.options.identityLight, resetPerformanceCounters };
+  }
+  /** Worker-side entry consumes the already issued source list without enqueueing it again. */
+  executeIssued(input: IssuedRendererCommands): SubmissionReceipt {
+    if (this.thread !== null) throw new Error("A renderer frontend cannot consume its own threaded command list");
+    const data = this.active(), commands = this.commandMemory(), destination = commands.data();
+    if (input.bytes.byteLength !== destination.byteLength) throw new RangeError("Issued renderer command allocation has the wrong size");
+    if (input.beginFrame) this.beginFrame();
+    this.setIdentityLight(input.identityLight);
+    if (input.resetPerformanceCounters) this.performance.report(0, this.target.width, this.target.height, () => 0, () => undefined);
+    commands.discardReferences();
+    new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength).set(input.bytes);
+    for (const entry of input.references) commands.retain(entry.offset, entry.reference);
+    const counts: Counts = { commands: 0, views: 0, batches: 0 };
+    execute(data, () => { this.executeCommands(data, counts, commands, input.smpFrame); return undefined; });
+    return Object.freeze({ ...counts });
+  }
   private swapBuffers(data: TargetData, present: (() => undefined) | null): void {
     if (checked(data, () => this.options.runtime.showImages) !== 0) this.showImages(data);
     if (checked(data, () => this.options.runtime.measureOverdraw) !== 0) {
       const memory = this.temporaryMemory;
-      if (memory === null) throw new Error("Overdraw measurement requires renderer temporary memory");
-      const allocation = invoke(data, memory, value => value.allocateTemp, [Math.imul(this.target.width, this.target.height)]);
-      const stencil = checked(data, () => allocation.bytes);
+      if (memory === null && this.temporaryBuffer === undefined) throw new Error("Overdraw measurement requires renderer temporary memory");
+      const bytes = Math.imul(this.target.width, this.target.height);
+      const allocation = memory === null ? null : invoke(data, memory, value => value.allocateTemp, [bytes]);
+      const temporaryBuffer = this.temporaryBuffer;
+      const owned = allocation === null && temporaryBuffer !== undefined ? checked(data, () => temporaryBuffer(bytes)) : null;
+      const stencil = checked(data, () => {
+        if (allocation !== null) return allocation.bytes;
+        if (owned === null) throw new Error("Overdraw temporary memory did not return an allocation");
+        return owned.bytes;
+      });
       invoke(data, data.backends[0], value => value.readStencilOverdraw, [stencil]);
       let sum = 0;
       for (const value of stencil) sum += value;
       this.performance.backEnd.c_overDraw = f(this.performance.backEnd.c_overDraw + f(sum));
-      invoke(data, memory, value => value.freeTemp, [allocation]);
+      if (memory !== null && allocation !== null) invoke(data, memory, value => value.freeTemp, [allocation]);
+      else if (owned !== null) invoke(data, owned, value => value.release, []);
     }
     if (!this.finishCalled) for (const backend of data.backends) invoke(data, backend, value => value.finish, []);
     for (const backend of data.backends) invoke(data, backend, value => value.drawImmediate,
@@ -895,15 +970,23 @@ export class RenderCommandBuffer {
       commands.retain(offset, { kind: "swap-buffers", present });
     }
     commands.issue();
+    let threadedReceipt: SubmissionReceipt | null = null;
     execute(data, () => {
+      this.thread?.beforeIssue();
+      this.thread?.synchronize();
       if (completion === "frame-end") this.performance.report(checked(data, () => this.options.runtime.speeds),
         this.target.width, this.target.height, () => invoke(data, this.target.images, value => value.sumOfUsedImages, []),
         text => invoke(data, this.options, value => value.print, [text]));
-      this.executeCommands(data, counts, commands, smpFrame);
+      if (this.thread === null) this.executeCommands(data, counts, commands, smpFrame);
+      else if (!checked(data, () => this.options.runtime.skipBackEnd)) {
+        const packet = this.captureIssued(commands, smpFrame, completion === "frame-end");
+        threadedReceipt = this.thread.issue(packet);
+        this.threadFrameStart = false;
+      }
       return undefined;
     });
     if (completion === "frame-end") this.timings = Object.freeze(this.performance.finishFrame());
-    return Object.freeze({ ...counts });
+    return threadedReceipt ?? Object.freeze({ ...counts });
   }
   submit(): SubmissionReceipt { return this.submission("mid-frame", null); }
   submitFrame(present?: () => undefined): SubmissionReceipt | null { return this.submission("frame-end", present ?? null); }
@@ -924,11 +1007,13 @@ export class RenderCommandBuffer {
     invoke(data, this.options, value => value.print, [`${(end - start) | 0} msec to draw all images\n`]);
   }
   endRegistration(): undefined {
+    if (this.thread !== null) { this.submit(); this.thread.synchronize(); return this.thread.endRegistration(); }
     this.submit();
     const data = this.active();
     execute(data, () => { this.showImages(data); return undefined; });
   }
   stretchRaw(rect: Rect2D, call: PreparedUiRawCall): undefined {
+    if (this.thread !== null) { this.submit(); this.thread.synchronize(); return this.thread.stretchRaw(rect, call); }
     const data = this.active();
     execute(data, () => {
       if (this.rawCalls.has(call)) throw new Error("Raw cinematic call was already consumed");

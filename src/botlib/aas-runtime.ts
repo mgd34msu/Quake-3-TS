@@ -17,13 +17,14 @@ import { AasHideRouting, aasNextModelReachability } from "./aas-route-queries.ts
 import { AasStringIndexes } from "./aas-string-indexes.ts";
 import { aasAreaGroundFace, aasFacePlane, aasTraceEndFace, aasPlaneFromNum } from "./aas-sample-queries.ts";
 import { AasClustering } from "./aas-cluster.ts";
-import { writeAasFile } from "./aas-file.ts";
+import { printAasFileInfo, writeAasFile } from "./aas-file.ts";
 import type { AasFileWriteHost } from "./aas-file.ts";
 import { AasMovement, AasMovementSettings, initAasMovementSettings } from "./aas-movement.ts";
 import type { AasClientMoveOutput, AasMovementDebug, AasMovementPrediction, AasMovementQueries, AasPredictionRequest } from "./aas-movement.ts";
 import { AasLinkHeap } from "./aas-links.ts";
 import { aasOptimize } from "./aas-optimize.ts";
 import { AasReachabilityGenerator } from "./aas-reachability.ts";
+import type { AasReachabilityDebugState } from "./aas-reachability.ts";
 import { writeEmptyRouteCache } from "./aas-route-cache.ts";
 import type { AasRouteCacheWriteHost } from "./aas-route-cache.ts";
 import { AasWorldState } from "./aas-world.ts";
@@ -34,7 +35,7 @@ import type { BotLibVar, BotLibVars } from "./libvars.ts";
 import { BotMemory } from "./memory.ts";
 import { AasRouting, initializeAasRoutePrediction, RouteStopEvent, TravelFlags } from "./routing.ts";
 import type { AasRoutePredictionOutput, AlternativeGoal, AlternativeRouteQuery, AlternativeRoutingLog,
-  AreaTravelTimeQuery, PredictRouteQuery } from "./routing.ts";
+  AreaTravelTimeQuery, PredictRouteQuery, AasRoutingDebug, AasAlternativeRouteDebug } from "./routing.ts";
 import { AasSpatial, BotBrushModelTypes, presenceTypeBounds } from "./spatial.ts";
 import type { AasAreaCrossing, AasSpatialHost, AasTrace, AasGoalPosition } from "./spatial.ts";
 
@@ -49,6 +50,11 @@ export interface AasAreaInfo {
 }
 
 export interface AasRuntimeOptions {
+  readonly routingDebug?: AasRoutingDebug;
+  readonly alternativeRouteDebug?: AasAlternativeRouteDebug;
+  readonly fileDebug?: boolean;
+  readonly sampleDebug?: boolean;
+  readonly reachabilityDebugState?: AasReachabilityDebugState;
   readonly memory?: BotMemory;
   readonly variables: BotLibVars;
   readonly print: (severity: 1 | 2 | 3 | 4 | 5, text: string) => undefined;
@@ -193,7 +199,9 @@ export class AasRuntime implements AasEntityHost {
   indexFromModel(model: string): number { return this.stringIndexes.indexFromModel(model); }
   updateStringIndexes(count: number, strings: readonly (string | null)[]): void { this.stringIndexes.update(count, strings); }
 
-  areaGroundFace(area: number, point: Vec3): AasFace | null { return aasAreaGroundFace(this.queryWorld(), area, point); }
+  areaGroundFace(area: number, point: Vec3): AasFace | null {
+    return aasAreaGroundFace(this.queryWorld(), area, point, this.options.sampleDebug ? text => { this.options.print(1, text); } : null);
+  }
   areaCrouch(area: number): number { return Number((this.areaSettingsRecord(area).presenceType & 2) === 0); }
   areaSwim(area: number): number { return Number((this.areaSettingsRecord(area).flags & 4) !== 0); }
   areaLiquid(area: number): number { return this.areaSwim(area); }
@@ -235,7 +243,9 @@ export class AasRuntime implements AasEntityHost {
     return settings.presenceType;
   }
 
-  traceEndFace(trace: AasTrace): AasFace | null { return aasTraceEndFace(this.queryWorld(), trace); }
+  traceEndFace(trace: AasTrace): AasFace | null {
+    return aasTraceEndFace(this.queryWorld(), trace, this.options.sampleDebug ? text => { this.options.print(1, text); } : null);
+  }
   planeFromNum(plane: number): AasPlane | null { return aasPlaneFromNum(this.queryWorld(), plane); }
   facePlane(face: number): AasPlane {
     const world = this.queryWorld();
@@ -332,7 +342,7 @@ export class AasRuntime implements AasEntityHost {
           if (host === null) throw new Error("AAS movement entity collision has no current host");
           return spatial.traceAreaEntityCollision(area, segmentStart, segmentEnd, bounds, passEntity,
             (entity, entityStart, entityEnd, entityBounds, mask) => host.entityTrace(entity, entityStart, entityEnd, entityBounds, mask));
-        }, text => { runtime.options.print(3, text); });
+        }, text => { runtime.options.print(3, text); }, runtime.options.sampleDebug);
       },
       traceAreas: (start, end, maximum) => {
         const crossings: AasAreaCrossing[] = [];
@@ -395,7 +405,7 @@ export class AasRuntime implements AasEntityHost {
     if (!this.loaded) return 0;
     if (this.currentPhase.kind === "data-loaded") {
       return AasSpatial.writeWorldTraceAreas(this.currentPhase.world, start, end, maximumAreas, publish,
-        text => { this.options.print(3, text); });
+        text => { this.options.print(3, text); }, this.options.sampleDebug);
     }
     return this.queryMap().spatial.writeTraceAreas(start, end, maximumAreas, publish);
   }
@@ -494,9 +504,11 @@ export class AasRuntime implements AasEntityHost {
     this.currentPhase = { kind: "unloaded" };
     const result = this.readAas(input.assets, filename);
     if (result.kind === "failed") return result.error;
-    const world = new AasWorldState(result.world);
+    const world = new AasWorldState(result.world,
+      this.options.sampleDebug ? (severity, text) => { this.options.print(severity, text); } : null);
     this.currentPhase = { kind: "data-loaded", name, world };
     result.close();
+    if (this.options.fileDebug === true) printAasFileInfo(world, this.options.print);
     this.options.print(1, `loaded ${filename}\n`);
     this.currentFilename = filename;
     const settings = initAasMovementSettings((variable, initial) => this.options.variables.value(variable, initial), this.movementSettings);
@@ -514,12 +526,17 @@ export class AasRuntime implements AasEntityHost {
       modelBounds: (model, angles) => input.spatialHost.modelBounds(model, angles),
     };
     const spatial = new AasSpatial(world, this.bspEntities, spatialHost, settings, this.brushModelTypes, this.linkHeap,
-      this.options.movementDebug, () => this.options.variables.value("bot_visualizejumppads", "0"));
-    const routing = new AasRouting(world, { ...(this.options.memory === undefined ? {} : { memory: this.options.memory }), hideRouting: this.hideRouting, host: {
+      this.options.movementDebug, () => this.options.variables.value("bot_visualizejumppads", "0"), this.options.sampleDebug);
+    const routing = new AasRouting(world, {
+      milliseconds: () => this.options.milliseconds(),
+      ...(this.options.routingDebug === undefined ? {} : { routingDebug: this.options.routingDebug }),
+      ...(this.options.alternativeRouteDebug === undefined ? {} : { alternativeRouteDebug: this.options.alternativeRouteDebug }),
+      ...(this.options.memory === undefined ? {} : { memory: this.options.memory }), hideRouting: this.hideRouting, host: {
       initialized: () => this.initialized, developer: () => this.options.developer(),
       print: (severity, text) => this.options.print(severity, text),
     } });
     const reachability = new AasReachabilityGenerator({ world, spatial, bspEntities: this.bspEntities,
+      ...(this.options.reachabilityDebugState === undefined ? {} : { debugState: this.options.reachabilityDebugState }),
       variables: this.options.variables, print: (severity, text) => this.options.print(severity, text),
       log: text => { this.options.log.write(text); return undefined; },
       milliseconds: () => this.options.milliseconds(),

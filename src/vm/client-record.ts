@@ -37,7 +37,7 @@ function writeString(view: DataView, offset: number, capacity: number, value: st
   }
 }
 
-/** CPU uses the ordinary GLDRV_ICD compatibility branch without claiming a native GL driver.
+/** The default CPU profile uses GLDRV_ICD without claiming a native GL driver.
  * Its maximum is RgbaSnapshot's signed-int32 dimension ceiling; allocations can still fail.
  */
 export function writeQvmGlConfig(view: DataView, value: RendererConfigurationSnapshot): void {
@@ -55,8 +55,10 @@ export function writeQvmGlConfig(view: DataView, value: RendererConfigurationSna
   view.setInt32(11272, value.colorBits, true);
   view.setInt32(11276, value.depthBits, true);
   view.setInt32(11280, value.stencilBits, true);
-  view.setInt32(11284, 0, true); // GLDRV_ICD
-  view.setInt32(11288, 0, true); // GLHW_GENERIC
+  const drivers = { cpu: 0, icd: 0, standalone: 1, voodoo: 2 };
+  const hardware = { generic: 0, "3dfx2d3d": 1, riva128: 2, ragepro: 3, permedia2: 4 };
+  view.setInt32(11284, drivers[value.driverType], true);
+  view.setInt32(11288, hardware[value.hardwareType], true);
   view.setInt32(11292, Number(value.deviceSupportsGamma), true);
   view.setInt32(11296, value.textureCompression === "s3tc" ? 1 : 0, true); // TC_S3TC / TC_NONE
   view.setInt32(11300, Number(value.textureEnvAddAvailable), true);

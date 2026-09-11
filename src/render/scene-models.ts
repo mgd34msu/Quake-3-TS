@@ -50,7 +50,7 @@ export class SceneModelRegistry {
   constructor(private readonly assets: RetainedFileReader, private readonly material: (name: string) => Promise<MaterialRecord>,
     private readonly hunk: HunkAccountingProfile, private readonly defaultMaterial: MaterialRecord,
     private readonly print: (text: string) => undefined, private readonly shaderForHandle: (index: number) => MaterialRecord | null,
-    private readonly syncRenderThread: () => void) {}
+    private readonly syncRenderThread: () => void, private readonly debugBuild = false) {}
 
   initializeSkins(): void {
     this.skins.length = 0;
@@ -218,7 +218,11 @@ export class SceneModelRegistry {
       numLods++;
     }
     const kind = record.loadKind;
-    if (numLods === 0 || kind === null) return fail();
+    if (numLods === 0) {
+      if (this.debugBuild) this.print(`^3RE_RegisterModel: couldn't load ${sourcePath}\n`);
+      return fail();
+    }
+    if (kind === null) return fail();
     // This runs only below a nonzero failed load, not after missing files exhaust the loop.
     for (lod--; lod >= 0; lod--) {
       const alias = md3[lod + 1];

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { describe, expect, test } from "bun:test";
+import { NativeRoot } from "../src/assets/native-root.ts";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -82,7 +83,7 @@ describe.skipIf(process.env["QUAKE_GL_TEST"] !== "1")("system OpenGL indexed ren
     const root = mkdtempSync(join(tmpdir(), "quake3-gl-call-output-"));
     const cvars = new CvarRegistry(); new RegisteredRendererCvars(cvars, "linux"); cvars.register("fs_basepath", root);
     const files = new WritableFileSystem({ homePath: root, product: "baseq3", print: () => {} });
-    const logging = new GlCallLogging({ cvars, openLog: path => files.openGlLog(path), print: () => {},
+    const logging = new GlCallLogging({ cvars, openLog: path => files.openGlLog(NativeRoot.fromSource(path)), print: () => {},
       localCalendar: () => ({ year: 126, month: 8, day: 9, hour: 1, minute: 2, second: 3, weekday: 3, yearDay: 251, isDst: 1 }) });
     try {
       withRenderer(renderer => {

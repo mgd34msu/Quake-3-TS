@@ -60,11 +60,13 @@ export class ClientHost {
               const queued = created.takeQueuedEvent();
               if (queued !== null) return queued;
               created.pollConsoleEvent();
-              systemInput.joystickFrame((key, down, time) => { created.queueEvent({ kind: "key", key, down, time }); });
+              systemInput.joystickFrame((key, down, time) => { created.queueEvent({ kind: "key", key, down, time }); },
+                (dx, dy, time) => { created.queueEvent({ kind: "mouse", dx, dy, time }); });
+              client.pollMidiInput(created);
               created.pollPacketEvent();
               return created.takeQueuedEvent() ?? created.noneEvent();
             }
-            if (sourceInput !== input) { sourceInput = input; source = new GraphicalEventSource(created, input); }
+            if (sourceInput !== input) { sourceInput = input; source = new GraphicalEventSource(created, input, () => client.pollMidiInput(created)); }
             return source.getEvent();
           },
           yieldToIo: () => created.yieldToIo(),
@@ -76,6 +78,11 @@ export class ClientHost {
       createServer: services => {
         const createdUnix = unix;
         if (createdUnix === null) throw new Error("Client platform must exist before server construction");
+        services.common.commands.registerAsync("net_restart", async () => {
+          services.assertCurrentOperation();
+          await createdUnix.restartNetwork(services.common.cvars);
+          services.assertCurrentOperation();
+        });
         createdUnix.bindConsoleCompletion(field => {
           field.complete(services.common.commands, services.common.cvars, text => { services.common.output.print(text); });
         });
@@ -90,6 +97,7 @@ export class ClientHost {
         server = created;
         services.deferCleanup(() => created.disposeResources());
         client.bind({ common: services.common, events: services.events, io: createdUnix, loopback: services.loopback, server: created,
+          runRendererCallback: services.runRendererCallback,
           assertCurrentOperation: services.assertCurrentOperation, pumpForDownloadsComplete: services.pumpForDownloadsComplete });
         return created;
       },

@@ -1,7 +1,7 @@
 // FS_SV_FOpenFileRead/Write and FS_GetModList from id Software's code/qcommon/files.c.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 
-import { resolve } from "node:path";
+import { NativeRoot } from "./native-root.ts";
 import { closeSync, realpathSync } from "node:fs";
 import type { Buffer } from "node:buffer";
 import { openDownloadDescriptor, ServerDownloadError, ServerDownloadFile } from "./download-file.ts";
@@ -14,21 +14,21 @@ import { checkListBytes, listLooseNames, looseRequestPath, openLooseDescriptor, 
 import type { OpenedRead, TrackedVirtualFileSystem } from "./vfs.ts";
 import type { WritableBinaryFile } from "./writable-files.ts";
 
-function osPath(root: string, filename: string): string {
-  const path = `${root}/${looseRequestPath(filename)}`;
+function osPath(root: NativeRoot, filename: string): string {
+  const path = `${root.sourceText}/${looseRequestPath(filename)}`;
   if (path.length >= 4096) throw new RangeError("Server file path exceeds the supported Unix MAX_OSPATH");
   return path;
 }
 
-function canonicalRoot(root: string): Buffer | undefined {
-  try { return realpathSync(resolve(root === "" ? "/" : root), { encoding: "buffer" }); }
+function canonicalRoot(root: NativeRoot): Buffer | undefined {
+  try { return realpathSync(root.resolvedBytes(), { encoding: "buffer" }); }
   catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") return undefined;
     throw error;
   }
 }
 
-function listRootNames(root: string, path: string, extension: string): readonly string[] {
+function listRootNames(root: NativeRoot, path: string, extension: string): readonly string[] {
   const directory = canonicalRoot(root);
   return directory === undefined ? [] : listLooseNames(directory, path, extension);
 }
@@ -47,7 +47,7 @@ export class ServerFileSystem {
     if (this.common.current !== view) throw new Error("Filesystem mounts changed during server file operation");
   }
 
-  private openAt(root: string, filename: string, label: "fs_homepath" | "fs_basepath" | "fs_cdpath", file: FileHandle | null,
+  private openAt(root: NativeRoot, filename: string, label: "fs_homepath" | "fs_basepath" | "fs_cdpath", file: FileHandle | null,
     view: TrackedVirtualFileSystem, profile: "ordinary" | "download"): void {
     const path = osPath(root, filename);
     const debug = this.cvars.get("fs_debug");
@@ -58,7 +58,7 @@ export class ServerFileSystem {
     }
     // Empty fs_cdpath builds /filename in the source, never a cwd-relative path.
     if (profile === "download") {
-      const opened = root === "" ? undefined : openDownloadDescriptor(root, filename);
+      const opened = root.sourceText === "" ? undefined : openDownloadDescriptor(root, filename);
       this.handles.assignServerRead(file, opened?.descriptor, opened?.root ?? null);
     } else {
       const directory = canonicalRoot(root);
@@ -75,11 +75,11 @@ export class ServerFileSystem {
     this.assertCurrent(view);
     const roots = this.common.roots;
     this.openAt(roots.homePath, filename, "fs_homepath", file, view, profile);
-    if (!this.handles.serverReadOccupied(file) && !pathCaseEqual(roots.homePath, roots.dataPath)) {
+    if (!this.handles.serverReadOccupied(file) && !pathCaseEqual(roots.homePath.sourceText, roots.dataPath.sourceText)) {
       this.openAt(roots.dataPath, filename, "fs_basepath", file, view, profile);
       if (!this.handles.serverReadOccupied(file)) file = null;
     }
-    if (!this.handles.serverReadOccupied(file)) this.openAt(roots.cdPath ?? "", filename, "fs_cdpath", file, view, profile);
+    if (!this.handles.serverReadOccupied(file)) this.openAt(roots.cdPath ?? NativeRoot.fromSource(""), filename, "fs_cdpath", file, view, profile);
     if (!this.handles.serverReadOccupied(file) || file === null) return null;
     try {
       const length = this.handles.captureLooseLength(file);
@@ -157,7 +157,7 @@ export class ServerFileSystem {
     this.sound.clearSoundBuffer();
     this.assertCurrent(view);
     const beforeRename = (root: string): void => {
-      const source = osPath(root, from), destination = osPath(root, to);
+      const source = osPath(NativeRoot.fromSource(root), from), destination = osPath(NativeRoot.fromSource(root), to);
       const debug = this.cvars.get("fs_debug");
       if (debug === undefined) throw new Error("Server filesystem requires registered fs_debug");
       if (debug.integerValue !== 0) {
@@ -195,9 +195,9 @@ export class ServerFileSystem {
     destination[0] = 0;
     const roots = this.common.roots;
     const names: string[] = [];
-    for (const root of [roots.homePath, roots.dataPath, roots.cdPath ?? ""]) {
+    for (const root of [roots.homePath, roots.dataPath, roots.cdPath ?? NativeRoot.fromSource("")]) {
       // Sys_ListFiles("") fails; only FS_BuildOSPath adds a leading separator.
-      if (root !== "") names.push(...listRootNames(root, "", "/"));
+      if (root.sourceText !== "") names.push(...listRootNames(root, "", "/"));
     }
     const seen: string[] = [];
     let total = 0, count = 0;
@@ -206,7 +206,7 @@ export class ServerFileSystem {
       seen.push(name);
       if (pathCaseEqual(name, "baseq3") || name.startsWith(".")) continue;
       let hasPaks = false;
-      for (const root of [roots.dataPath, roots.cdPath ?? "", roots.homePath]) {
+      for (const root of [roots.dataPath, roots.cdPath ?? NativeRoot.fromSource(""), roots.homePath]) {
         osPath(root, name);
         if (listRootNames(root, name, ".pk3").length > 0) { hasPaks = true; break; }
       }

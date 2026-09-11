@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Typed system OpenGL entry points, replacing code/unix/linux_qgl.c loading.
 import { linkSymbols } from "bun:ffi";
-import type { SdlWindow } from "./sdl.ts";
+import type { SdlRenderContext } from "./sdl-render-context.ts";
 
 /** GLW_InitExtensions reaches both required lookups only for enabled compiled arrays. */
-export function loadGlCompiledVertexArrays(window: SdlWindow) {
+export function loadGlCompiledVertexArrays(window: Pick<SdlRenderContext, "getGlProcAddress">) {
   return linkSymbols({
     glLockArraysEXT: { args: ["i32", "i32"], returns: "void", ptr: window.getGlProcAddress("glLockArraysEXT") },
     glUnlockArraysEXT: { args: [], returns: "void", ptr: window.getGlProcAddress("glUnlockArraysEXT") },
   });
 }
 
-export function loadGl(window: SdlWindow) {
+export function loadGl(window: Pick<SdlRenderContext, "getGlProcAddress">) {
   return linkSymbols({
     glCallList: { args: ["u32"], returns: "void", ptr: window.getGlProcAddress("glCallList") },
     glNewList: { args: ["u32", "u32"], returns: "void", ptr: window.getGlProcAddress("glNewList") },
@@ -19,6 +19,8 @@ export function loadGl(window: SdlWindow) {
     glDeleteLists: { args: ["u32", "i32"], returns: "void", ptr: window.getGlProcAddress("glDeleteLists") },
     glGetString: { args: ["u32"], returns: "cstring", ptr: window.getGlProcAddress("glGetString") },
     glGetError: { args: [], returns: "u32", ptr: window.getGlProcAddress("glGetError") },
+    // Khronos OpenGL-Registry xml/gl.xml: glHint(GLenum target, GLenum mode).
+    glHint: { args: ["u32", "u32"], returns: "void", ptr: window.getGlProcAddress("glHint") },
     glIsEnabled: { args: ["u32"], returns: "u8", ptr: window.getGlProcAddress("glIsEnabled") },
     glGetIntegerv: { args: ["u32", "buffer"], returns: "void", ptr: window.getGlProcAddress("glGetIntegerv") },
     glGetFloatv: { args: ["u32", "buffer"], returns: "void", ptr: window.getGlProcAddress("glGetFloatv") },

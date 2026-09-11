@@ -104,6 +104,15 @@ export class SourceSceneSubmissionMemory {
     this.backend.polyData(index).setInt32(8, fog + 1, true);
   }
 
+  /** RagePro changes verts[0], including retained storage for a zero-count polygon. */
+  writeFirstVertexWhite(index: number): void {
+    const data = this.backend.polyVertexDataAtPointer(this.backend.polyData(index).getUint32(16, true));
+    data.setUint8(20, 255);
+    data.setUint8(21, 255);
+    data.setUint8(22, 255);
+    data.setUint8(23, 255);
+  }
+
   light(index: number, transformed = false): DynamicLight {
     const read = (): DataView => this.backend.dlightData(index);
     read();

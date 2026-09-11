@@ -3,6 +3,8 @@
 import type { udp } from "bun";
 import { getSystemErrorName } from "node:util";
 import { MAX_MESSAGE_LENGTH } from "../protocol/message.ts";
+import { readSocksDatagram, SocksAssociation, socksDatagram } from "./socks.ts";
+import type { SocksOptions } from "./socks.ts";
 
 // Sys_GetPacket rejects a receive filling sys_packetReceived[MAX_MSGLEN].
 export const MAX_DATAGRAM_LENGTH = MAX_MESSAGE_LENGTH - 1;
@@ -19,7 +21,7 @@ export interface UdpBindOptions {
 export type UdpReceiveEvent =
   | { readonly kind: "packet"; readonly from: Ipv4Address; readonly payload: Uint8Array; readonly receivedAt: number }
   | { readonly kind: "error"; readonly error: Error };
-type QueuedReceive = UdpReceiveEvent | { readonly kind: "oversize"; readonly from: Ipv4Address };
+type QueuedReceive = UdpReceiveEvent | { readonly kind: "oversize"; readonly from: Ipv4Address; readonly prefix: Uint8Array };
 export interface UdpStatistics {
   readonly received: number;
   readonly oversizeDropped: number;
@@ -84,7 +86,7 @@ class ReceivedPackets {
       const from = nativeAddress(hostname, port);
       if (truncated || payload.byteLength > MAX_DATAGRAM_LENGTH) {
         this.oversizeDropped++;
-        event = { kind: "oversize", from };
+        event = { kind: "oversize", from, prefix: payload.slice(0, 10) };
       } else {
         const receivedAt = this.now();
         if (!Number.isFinite(receivedAt) || receivedAt < 0 || receivedAt < this.lastTime) throw new Error("UDP receive clock must be finite, nonnegative and monotonic");
@@ -137,6 +139,7 @@ class ReceivedPackets {
 
 export class UdpTransport {
   private closed = false;
+  private socks: SocksAssociation | null = null;
   private constructor(private readonly socket: udp.Socket<"uint8array">, private readonly received: ReceivedPackets,
     readonly address: Ipv4Address, private readonly print: (text: string) => undefined) {}
 
@@ -164,12 +167,32 @@ export class UdpTransport {
   /** Counters last for this socket's lifetime; close clears only pending events. */
   get statistics(): UdpStatistics { return this.received.statistics; }
 
+  /** NET_OpenSocks failure retains the direct UDP socket. */
+  async connectSocks(options: SocksOptions): Promise<void> {
+    this.opened();
+    this.socks?.close();
+    const association = new SocksAssociation();
+    this.socks = association;
+    this.print("Opening connection to SOCKS server.\n");
+    try { await association.open(options, this.address.port); this.opened(); }
+    catch {
+      association.close();
+      if (this.socks === association) this.socks = null;
+      this.opened();
+      this.print("NET_OpenSocks: negotiation failed\n");
+    }
+  }
+
   send(to: Ipv4Address, payload: Uint8Array): boolean {
     this.opened();
-    const destination = checkedAddress(to.host, to.port, true);
+    let destination = checkedAddress(to.host, to.port, true);
     if (payload.byteLength > MAX_DATAGRAM_LENGTH) throw new RangeError("UDP datagram exceeds the source receive limit");
     // The owned copy also isolates caller mutations while the native send completes.
-    const bytes = new Uint8Array(payload), hostname = destination.host.join(".");
+    const relay = this.socks?.relay;
+    const proxied = relay !== undefined && relay !== null && !destination.host.every(octet => octet === 255);
+    const bytes = proxied ? socksDatagram(destination, payload) : new Uint8Array(payload);
+    if (proxied) destination = relay;
+    const hostname = destination.host.join(".");
     try { return this.socket.send(bytes, destination.port, hostname); }
     catch (error) {
       if (!isNativeSendError(error)) throw error;
@@ -182,9 +205,17 @@ export class UdpTransport {
   poll(): UdpReceiveEvent | null {
     this.opened();
     const event = this.received.poll();
+    const relay = this.socks?.relay;
+    const fromRelay = event !== null && event.kind !== "error" && relay !== undefined && relay !== null
+      && event.from.port === relay.port && event.from.host.every((octet, index) => octet === relay.host[index]);
     if (event?.kind === "oversize") {
-      this.print(`Oversize packet from ${event.from.host.join(".")}:${event.from.port}\n`);
+      const from = fromRelay ? readSocksDatagram(event.prefix)?.from : event.from;
+      if (from !== undefined) this.print(`Oversize packet from ${from.host.join(".")}:${from.port}\n`);
       return null;
+    }
+    if (event?.kind === "packet" && fromRelay) {
+      const packet = readSocksDatagram(event.payload);
+      return packet === null ? null : { kind: "packet", ...packet, receivedAt: event.receivedAt };
     }
     return event;
   }
@@ -198,6 +229,7 @@ export class UdpTransport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.socks?.close(); this.socks = null;
     try { this.received.close(); }
     finally { this.socket.close(); }
   }

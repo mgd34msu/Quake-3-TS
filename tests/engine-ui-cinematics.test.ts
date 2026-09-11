@@ -112,7 +112,7 @@ describe("UI cinematic adapter over the consuming renderer", () => {
     expect(issued).toBe(0); expect(f.cpu.finishes).toBe(0); expect(f.rendererClock.reads).toBe(0);
     f.runtime.run(instance.handle.index, 900000); f.clock.time = 34; f.runtime.run(instance.handle.index, 900000);
     f.runtime.draw(instance.handle.index, rect, f.draw);
-    expect(issued).toBe(1); expect(f.cpu.finishes).toBe(1); expect(f.rendererClock.reads).toBe(1);
+    expect(issued).toBe(1); expect(f.cpu.finishes).toBe(1); expect(f.rendererClock.reads).toBe(3);
     expect(f.owner.prepareUiRaw(instance.handle)?.dirty).toBe(false);
     expect(f.cpu.pixels.every(value => value === 255)).toBe(true);
     expect(f.commands.submit()).toEqual({ commands: 0, views: 0, batches: 0 });

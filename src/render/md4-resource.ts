@@ -220,11 +220,26 @@ class Resource {
   private readonly surfaces = new Map<number, ResourceSurface>();
   private readonly loadedLods: ResourceSurface[][] = [];
 
-  constructor(private readonly allocation: Md4Allocation, private readonly registration: Md4RegistrationHost, private readonly defaultMaterial: MaterialRecord) {
+  constructor(private readonly allocation: Md4Allocation, private readonly registration: Pick<Md4RegistrationHost, "shaderForHandle" | "print">, private readonly defaultMaterial: MaterialRecord) {
     this.byteLength = allocation.byteLength;
   }
 
   get lods(): readonly (readonly ResourceSurface[])[] { return this.loadedLods; }
+
+  captureSurface(offset: number): Md4SurfaceTransfer {
+    return { bytes: new Uint8Array(this.allocation.bytes), source: this.allocation.source, offset,
+      defaultMaterial: this.defaultMaterial.order, lodOffsets: this.loadedLods.map(lod => lod.map(surface => surface.offset)) };
+  }
+
+  restoreSurfaces(lods: readonly (readonly number[])[], offset: number): RegisteredMd4Surface {
+    const checked = (offset: number): ResourceSurface => {
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset > this.byteLength - 168)
+        throw new RangeError("MD4 transferred surface lies outside its retained allocation");
+      return this.surface(offset);
+    };
+    for (const lod of lods) this.loadedLods.push(lod.map(checked));
+    return checked(offset);
+  }
 
   get model(): Md4Model {
     const allocation = this.allocation, numBones = allocation.i32(76, "bone count"), frames: Md4Frame[] = [];
@@ -320,6 +335,47 @@ class Resource {
 
 export type RegisteredMd4Surface = ResourceSurface;
 export type Md4Resource = Resource;
+
+export interface Md4SurfaceTransfer {
+  readonly bytes: Uint8Array;
+  readonly source: string;
+  readonly offset: number;
+  readonly defaultMaterial: number;
+  readonly lodOffsets: readonly (readonly number[])[];
+}
+
+export function parseMd4SurfaceTransfer(input: unknown): Md4SurfaceTransfer {
+  if (typeof input !== "object" || input === null || !("bytes" in input) || !(input.bytes instanceof Uint8Array)
+    || !("source" in input) || typeof input.source !== "string" || !("offset" in input) || typeof input.offset !== "number"
+    || !("defaultMaterial" in input) || typeof input.defaultMaterial !== "number" || !("lodOffsets" in input))
+    throw new TypeError("Invalid MD4 transfer record");
+  const isArray = (value: unknown): value is readonly unknown[] => Array.isArray(value);
+  const array = (value: unknown): readonly unknown[] => {
+    if (!isArray(value)) throw new TypeError("Invalid MD4 transfer LOD array");
+    return value;
+  };
+  const bytes = new Uint8Array(input.bytes);
+  const offset = (value: unknown): number => {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > bytes.byteLength - 168)
+      throw new RangeError("Invalid MD4 transferred surface offset");
+    return value;
+  };
+  if (!Number.isSafeInteger(input.defaultMaterial) || input.defaultMaterial < 0) throw new RangeError("Invalid MD4 transferred shader handle");
+  return { bytes, source: input.source, offset: offset(input.offset), defaultMaterial: input.defaultMaterial,
+    lodOffsets: array(input.lodOffsets).map(lod => array(lod).map(offset)) };
+}
+
+export function captureMd4Surface(surface: RegisteredMd4Surface): Md4SurfaceTransfer {
+  return surface.owner.captureSurface(surface.offset);
+}
+
+export function restoreMd4Surface(transfer: Md4SurfaceTransfer,
+  host: Pick<Md4RegistrationHost, "shaderForHandle" | "print">): RegisteredMd4Surface {
+  const fallback = host.shaderForHandle(transfer.defaultMaterial);
+  if (fallback === null) throw new Error("Transferred MD4 default shader is not registered");
+  const resource = new Resource(new Md4Allocation(new Uint8Array(transfer.bytes), transfer.source), host, fallback);
+  return resource.restoreSurfaces(transfer.lodOffsets, transfer.offset);
+}
 
 export async function loadMd4Resource(input: {
   readonly bytes: Uint8Array;

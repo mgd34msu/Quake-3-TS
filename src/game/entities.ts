@@ -7,13 +7,14 @@ import { qvmFloatToInt } from "../core/numeric.ts";
 import { EntityType, EVENT_VALID_MSEC, EV_EVENT_BIT1, EV_EVENT_BITS } from "../shared/definitions.ts";
 import type { Product } from "../shared/definitions.ts";
 import { ENTITYNUM_NONE, ENTITYNUM_WORLD } from "../shared/player-state.ts";
-import type { PredictableEvent } from "../shared/player-state.ts";
+import type { PredictableEvent, PredictableEventDebug } from "../shared/player-state.ts";
 import { TrajectoryType } from "../shared/trajectory.ts";
 import { GameClient, GameEntity, MAX_CLIENTS, MAX_GENTITIES } from "./state.ts";
 import { gameFormat } from "./format.ts";
 import { GameUtilityScratch } from "./utilities.ts";
 
 export interface EntityPoolOptions {
+  readonly eventDebug?: PredictableEventDebug;
   readonly product: Product;
   readonly maxClients: number;
   readonly mapStartTime: number;
@@ -74,6 +75,9 @@ export class EntityPool {
     this.#maxClients = options.maxClients;
     this.utilities = new GameUtilityScratch(options.print);
     this.clients = Array.from({ length: MAX_CLIENTS }, () => new GameClient(options.product));
+    if (options.eventDebug !== undefined) {
+      for (const client of this.clients) client.ps.setEventDebug(options.eventDebug);
+    }
     this.#entities = Array.from({ length: MAX_GENTITIES }, (_, index) => new GameEntity(index));
     for (let index = 0; index < options.maxClients; index++) this.at(index).client = this.clientAt(index);
   }

@@ -3,7 +3,7 @@
 
 import { closeSync, constants, fstatSync, openSync, realpathSync } from "node:fs";
 import { Buffer } from "node:buffer";
-import { resolve } from "node:path";
+import type { NativeRoot } from "./native-root.ts";
 import type { BorrowedLooseRead } from "./file-handles.ts";
 
 export type ServerDownloadErrorKind = "path" | "unsupported" | "io" | "size" | "changed";
@@ -42,7 +42,7 @@ function verifyDescriptorContainment(descriptor: number, root: Buffer, requested
 }
 
 /** Descriptor acquisition only. ServerFileSystem supplies source search/handle/sound ordering. */
-export function openDownloadDescriptor(root: string, name: string): { readonly descriptor: number; readonly root: Buffer } | undefined {
+export function openDownloadDescriptor(root: NativeRoot, name: string): { readonly descriptor: number; readonly root: Buffer } | undefined {
   if (process.platform !== "linux") throw new ServerDownloadError("unsupported", name,
     "Secure server download descriptor containment requires Linux /proc/self/fd", undefined);
   for (let index = 0; index < name.length; index++) {
@@ -51,9 +51,8 @@ export function openDownloadDescriptor(root: string, name: string): { readonly d
       "Server download filenames require non-NUL source bytes", undefined);
   }
   let rootBytes: Buffer, canonical: Buffer;
-  try { rootBytes = realpathSync(resolve(root), { encoding: "buffer" }); }
-  catch (cause) { throw externalError("io", root, "Cannot resolve server download root", cause); }
-  // Host roots are Unicode; FS_BuildOSPath appends source filename bytes verbatim.
+  try { rootBytes = realpathSync(root.resolvedBytes(), { encoding: "buffer" }); }
+  catch (cause) { throw externalError("io", root.sourceText, "Cannot resolve server download root", cause); }
   const requested = Buffer.concat([rootBytes, Buffer.from("/"), Buffer.from(name.replaceAll("\\", "/"), "latin1")]);
   try { canonical = realpathSync(requested, { encoding: "buffer" }); }
   catch (cause) {

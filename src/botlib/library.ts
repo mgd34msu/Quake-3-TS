@@ -6,6 +6,7 @@
 import type { VirtualFileSystem } from "../assets/vfs.ts";
 import type { CallSteps } from "../core/call-steps.ts";
 import type { Vec3 } from "../core/math.ts";
+import { vec3 } from "../core/math.ts";
 import type { LinuxNativeRandom } from "../core/native-random.ts";
 import type { ZoneArena } from "../core/zone.ts";
 import type { HunkAccountingProfile } from "../render/hunk-accounting.ts";
@@ -13,6 +14,8 @@ import type { ScriptDiagnostic, SourceLocation } from "../script/lexer.ts";
 import { ScriptGlobalDefines } from "../script/preprocessor.ts";
 import { BotActionBuffer } from "./actions.ts";
 import { AasRuntime } from "./aas-runtime.ts";
+import { AasReachabilityDebugState } from "./aas-reachability.ts";
+import type { AasDebugGeometry } from "./aas-debug-geometry.ts";
 import type { AasMapInput, AasRuntimeMap, AasRuntimeOptions } from "./aas-runtime.ts";
 import { BotCharacterLibrary } from "./character.ts";
 import { BotChatLibrary } from "./chat.ts";
@@ -25,8 +28,11 @@ import type { BotLibVar } from "./libvars.ts";
 import { BotLog } from "./log.ts";
 import type { BotLogOpenResult } from "./log.ts";
 import { BotMemory } from "./memory.ts";
-import { BotMovement } from "./movement.ts";
+import { BotMovement, BotMovementDebugState } from "./movement.ts";
+import type { BotMovementDebugOptions } from "./movement.ts";
 import { BotMovementRouting } from "./movement-routing.ts";
+import type { AvoidReachState } from "./movement-routing.ts";
+import { TravelFlags } from "./routing.ts";
 import { BotMoveStateStore } from "./movement-state.ts";
 import { BotScriptSources } from "./script-sources.ts";
 import { WeaponAi } from "./weapons.ts";
@@ -37,7 +43,22 @@ type BotLibraryFiles = Pick<VirtualFileSystem, "openRead" | "readInto" | "seekFi
 type PrintSeverity = 1 | 2 | 3 | 4 | 5;
 type DiagnosticSeverity = "message" | "info" | "warning" | "error" | "fatal";
 
+interface BotLibraryDebugGeometry {
+  readonly geometry: AasDebugGeometry;
+  readonly createLine: () => number;
+  readonly showLine: BotMovementDebugOptions["lineShow"];
+}
+
 export interface BotLibraryOptions extends Pick<AasRuntimeOptions, "milliseconds" | "openWrite" | "permanentLine" | "movementDebug"> {
+  readonly debugProfile?: BotLibraryDebugGeometry & { readonly kind: "source-debug" };
+  readonly memoryProfile?: "manager" | "debug";
+  readonly aasFileDebug?: boolean;
+  readonly aasSampleDebug?: boolean;
+  readonly reachDebug?: boolean;
+  readonly alternativeRouteDebug?: AasDebugGeometry;
+  readonly weaponDebug?: boolean;
+  readonly debugEval?: boolean;
+  readonly movementProfile?: BotLibraryDebugGeometry & Pick<BotMovementDebugOptions, "aiMove" | "elevator" | "funcBob" | "grapple">;
   /** Omitted only by unaccounted diagnostic compositions. */
   readonly hunk?: HunkAccountingProfile;
   /** Omitted only by diagnostic compositions without source heap accounting. */
@@ -77,6 +98,18 @@ function diagnosticSeverity(severity: DiagnosticSeverity): 1 | 2 | 3 | 4 {
   }
 }
 
+function debugFloat(value: number, digits: number): string {
+  if (!Number.isFinite(value)) return Number.isNaN(value) ? "nan" : value < 0 ? "-inf" : "inf";
+  const negative = value < 0 || Object.is(value, -0), absolute = Math.abs(value);
+  if (absolute >= 1e21) return `${negative ? "-" : ""}${BigInt(absolute)}.${"0".repeat(digits)}`;
+  const scale = 10 ** digits, scaled = absolute * scale, integer = Math.floor(scaled);
+  if (Number.isSafeInteger(integer) && scaled - integer === 0.5) {
+    const rounded = integer % 2 === 0 ? integer : integer + 1;
+    return `${negative ? "-" : ""}${(rounded / scale).toFixed(digits)}`;
+  }
+  return `${negative ? "-" : ""}${absolute.toFixed(digits)}`;
+}
+
 /** Server-lived botlib globals, shared script caches and source setup residue. */
 export class BotLibrary {
   readonly variables: BotLibVars;
@@ -95,6 +128,8 @@ export class BotLibrary {
   readonly aas: AasRuntime;
   readonly actions: BotActionBuffer;
   private mapMovement: MapMovement | null = null;
+  private readonly movementDebugState = new BotMovementDebugState();
+  private readonly reachabilityDebugState: AasReachabilityDebugState;
   private droppedWeight: BotLibVar | null = null;
   private goalGameType = 0;
   private developerValue = 0;
@@ -103,10 +138,21 @@ export class BotLibrary {
   private librarySetup = false;
   private terminal = false;
   private currentSetupStage: BotLibrarySetupStage = "none";
+  private debugArea = -1;
+  private readonly debugLines = [0, 0];
+  private debugGoalArea = 0;
+  private debugGoalOrigin = vec3(0, 0, 0);
+  private debugLastArea = 0;
+  private readonly debugAvoid: AvoidReachState = { avoidReach: [0], avoidReachTimes: [0], avoidReachTries: [0] };
 
   /** Constructors install borrows only. Source reads and setup run through setup(). */
   constructor(private readonly options: BotLibraryOptions) {
-    this.memory = new BotMemory(options.hunk, options.zone);
+    this.reachabilityDebugState = new AasReachabilityDebugState({ debug: this.debugBuild, reachDebug: options.reachDebug === true });
+    this.memory = new BotMemory(options.hunk, options.zone, options.memoryProfile === undefined ? undefined : {
+      kind: options.memoryProfile,
+      print: (severity, text) => this.print(severity === "message" ? 1 : 4, text),
+      writeLog: text => { this.log.write(text); },
+    });
     const variables = this.variables = new BotLibVars(this.memory);
     this.random = { nextInt: () => { this.requireLive(); return options.random.next(); } };
     this.globals = new ScriptGlobalDefines(diagnostic => this.scriptDiagnostic(diagnostic), this.memory);
@@ -114,10 +160,18 @@ export class BotLibrary {
       openRead: path => this.files().openRead(path),
       readInto: (file, buffer) => this.files().readInto(file, buffer),
       closeFile: file => this.files().closeFile(file),
-    }, this.globals, (severity, text) => this.print(severity, text), options.commonPrint, this.memory);
+    }, this.globals, (severity, text) => this.print(severity, text), options.commonPrint, this.memory,
+    options.debugEval ? text => { this.log.write(text); } : undefined);
     this.log = new BotLog({ variables, globals: this.logGlobals, print: (severity, text) => this.print(severity, text),
       openFile: filename => { this.requireLive(); return options.openLog(filename); } });
     this.aas = new AasRuntime({ variables, memory: this.memory, print: (severity, text) => this.print(severity, text),
+      sampleDebug: options.aasSampleDebug === true, reachabilityDebugState: this.reachabilityDebugState,
+      ...(this.debugBuild ? { routingDebug: { milliseconds: () => options.milliseconds(), print: (severity: 1, text: string) => this.print(severity, text) } } : {}),
+      ...(options.aasFileDebug ? { fileDebug: true } : {}),
+      ...(options.alternativeRouteDebug === undefined ? {} : { alternativeRouteDebug: {
+        milliseconds: () => options.milliseconds(), print: (severity: 1, text: string) => this.print(severity, text),
+        showAreaPolygons: options.alternativeRouteDebug.showAreaPolygons.bind(options.alternativeRouteDebug),
+      } }),
       commonPrint: options.commonPrint,
       log: this.log, developer: () => this.developerValue !== 0,
       milliseconds: () => this.options.milliseconds(), openWrite: filename => this.options.openWrite(filename),
@@ -125,15 +179,19 @@ export class BotLibrary {
       permanentLine: (start, end, color) => this.options.permanentLine(start, end, color) }, "unallocated");
     this.actions = new BotActionBuffer(null, { clientCommand: (client, text) => this.clientCommand(client, text) }, this.memory);
     const reloadCharacters = (): boolean => variables.getValue("bot_reloadcharacters") !== 0;
+    const contentDebug = this.debugBuild ? { debug: { milliseconds: () => options.milliseconds(), developer: () => this.developerValue !== 0 } } : {};
     this.weights = new WeightConfigStore(this.sources, { memory: this.memory, reloadCharacters,
+      ...contentDebug,
       print: (severity, text) => this.print(severity, text) });
     this.characters = new BotCharacterLibrary(this.sources, {
+      ...contentDebug,
       memory: this.memory,
       log: this.log,
       reloadCharacters,
       report: diagnostic => this.printDiagnostic(diagnostic.severity, diagnostic.message, diagnostic.location),
     });
     this.weapons = new WeaponAi({ resolver: this.sources, weights: this.weights }, {
+      ...(options.weaponDebug ? { debug: { log: this.log } } : {}),
       memory: this.memory,
       maxWeaponInfo: () => this.weaponCapacity("max_weaponinfo"),
       maxProjectileInfo: () => this.weaponCapacity("max_projectileinfo"),
@@ -141,6 +199,7 @@ export class BotLibrary {
         diagnostic.origin === "source" ? diagnostic.location : null),
     });
     this.goals = new BotGoalLibrary({
+      debug: this.debugBuild,
       memory: this.memory,
       log: this.log,
       resolver: this.sources, weightStore: this.weights, random: this.random,
@@ -160,6 +219,7 @@ export class BotLibrary {
       report: diagnostic => diagnostic.code === "missing-random" ? undefined : diagnostic.code === "print-fragment"
         ? this.print(1, diagnostic.message) : this.printDiagnostic(diagnostic.severity, diagnostic.message, diagnostic.location),
     }, {
+      ...contentDebug,
       log: this.log,
       maxMessages: () => variables.value("max_messages", "1024"),
       get synonymFile(): string { return variables.string("synfile", "syn.c"); },
@@ -183,6 +243,7 @@ export class BotLibrary {
   get setupStage(): BotLibrarySetupStage { return this.currentSetupStage; }
   get maxClients(): number { return this.clientCapacity; }
   get maxEntities(): number { return this.entityCapacity; }
+  get debugBuild(): boolean { return this.options.debugProfile !== undefined; }
   validClientNumber(client: number, operation: string): boolean {
     this.requireLive();
     if (!Number.isInteger(client) || client < -2147483648 || client > 2147483647) {
@@ -199,11 +260,71 @@ export class BotLibrary {
   get movementRouting(): BotMovementRouting { return this.requireMapMovement().routing; }
   time(): number { return this.aas.time(); }
 
-  /** BotExportTest: Unix Makefile flags and be_interface.h leave DEBUG undefined. */
+  /** BotExportTest; the default Unix release profile leaves DEBUG undefined. */
   test(): number;
   test(parm0: number, parm1: string | null, parm2: Vec3, parm3: Vec3): number;
-  test(_parm0?: number, _parm1?: string | null, _parm2?: Vec3, _parm3?: Vec3): number {
+  test(parm0?: number, _parm1?: string | null, parm2?: Vec3, _parm3?: Vec3): number {
     this.requireLive();
+    const debug = this.options.debugProfile;
+    if (debug === undefined || this.aas.phase.kind === "unloaded") return 0;
+    const phase = this.aas.phase;
+    if (phase.kind !== "loaded" && phase.kind !== "ready") throw new Error("BotExportTest requires completed AAS spatial loading");
+    if (parm0 === undefined || parm2 === undefined) throw new Error("DEBUG BotExportTest requires source flags and origin");
+    const { spatial, world, routing } = phase.map;
+    for (let index = 0; index < 2; index++) if (this.debugLines[index] === 0) this.debugLines[index] = debug.createLine();
+    const highlighted = sourceInteger(this.variables.getValue("bot_highlightarea"), "BotExportTest highlightarea");
+    // The highlighted source branch reads an uninitialized origin. Use its ordinary branch initialization.
+    const origin = vec3(parm2.x, parm2.y, Math.fround(parm2.z + 0.5));
+    const area = highlighted > 0 ? highlighted : spatial.fuzzyPointReachabilityArea(origin);
+    const travelTime = (flags: number): number => routing.areaTravelTimeToGoal({ area, origin, goalArea: this.debugGoalArea, travelFlags: flags });
+    this.print(1, `\rtravel time to goal (${this.debugGoalArea}) = ${travelTime(TravelFlags.DEFAULT)}  `);
+    if (area !== this.debugArea) {
+      this.print(1, `origin = ${debugFloat(origin.x, 6)}, ${debugFloat(origin.y, 6)}, ${debugFloat(origin.z, 6)}\n`);
+      this.debugArea = area;
+      this.print(1, `new area ${area}, cluster ${this.aas.areaCluster(area)}, presence type ${this.aas.pointPresenceType(origin)}\n`);
+      this.print(1, "area contents: ");
+      const settings = world.areaSettings[area];
+      if (settings === undefined) throw new RangeError("BotExportTest area exceeds source settings allocation");
+      const labels: readonly (readonly [number, string])[] = [[1, "water"], [2, "lava"], [4, "slime"], [128, "jump pad"],
+        [8, "cluster portal"], [512, "view portal"], [256, "do not enter"], [1024, "mover"]];
+      for (const [flag, label] of labels) if ((settings.contents & flag) !== 0) this.print(1, `${label} &`);
+      if (settings.contents === 0) this.print(1, "empty");
+      this.print(1, "\n");
+      this.print(1, `travel time to goal (${this.debugGoalArea}) = ${travelTime(TravelFlags.DEFAULT | TravelFlags.ROCKETJUMP)}\n`);
+    }
+    const flood = sourceInteger(this.variables.getValue("bot_flood"), "BotExportTest flood");
+    if ((parm0 & 1) !== 0) {
+      if (flood !== 0) {
+        debug.geometry.clearPolygons();
+        debug.geometry.lines.clear();
+        debug.geometry.floodAreas(world, parm2);
+      } else {
+        this.debugGoalArea = area;
+        this.debugGoalOrigin = vec3(parm2.x, parm2.y, parm2.z);
+        this.print(1, `new goal ${debugFloat(origin.x, 1)} ${debugFloat(origin.y, 1)} ${debugFloat(origin.z, 1)} area ${area}\n`);
+      }
+    }
+    if (flood !== 0) return 0;
+    debug.geometry.clearPolygons();
+    debug.geometry.lines.clear();
+    debug.geometry.showAreaPolygons(world, area, 1, (parm0 & 4) !== 0);
+    if ((parm0 & 2) !== 0) debug.geometry.showReachableAreas(spatial, this.debugArea, this.time());
+    else {
+      const goal = { area: this.debugGoalArea, origin: this.debugGoalOrigin, mins: vec3(0, 0, 0), maxs: vec3(0, 0, 0),
+        entity: 0, number: 0, flags: 0, itemInfo: 0 };
+      let currentArea = area;
+      const flags = TravelFlags.DEFAULT | TravelFlags.FUNCBOB | TravelFlags.ROCKETJUMP;
+      for (let index = 0; index < 100 && currentArea !== goal.area; index++) {
+        const selected = this.movementRouting.getReachabilityToGoal({ origin, area: currentArea, lastGoalArea: 0,
+          lastArea: this.debugLastArea, avoid: this.debugAvoid, goal, travelFlags: flags, moveTravelFlags: flags,
+          avoidSpots: [], numAvoidSpots: 0, flags: 0 });
+        const reach = this.movementRouting.reachabilityFromNum(selected.reachability);
+        debug.geometry.showReachability(spatial, reach);
+        // Source copies reach.end into origin, but never changes the curorigin passed to routing.
+        this.debugLastArea = currentArea;
+        currentArea = reach.area;
+      }
+    }
     return 0;
   }
 
@@ -214,6 +335,8 @@ export class BotLibrary {
     this.clientCapacity = 0;
     this.entityCapacity = 0;
     this.logGlobals.time = 0;
+    this.debugGoalArea = 0;
+    this.debugGoalOrigin = vec3(0, 0, 0);
     this.currentSetupStage = "log";
     this.log.open("botlib.log");
     this.requireLive();
@@ -266,6 +389,7 @@ export class BotLibrary {
     this.mapMovement = null;
     this.variables.clear();
     this.globals.clear();
+    if (this.debugBuild) this.memory.printMemoryLabels();
     this.log.shutdown();
     this.requireLive();
     this.librarySetup = false;
@@ -276,6 +400,7 @@ export class BotLibrary {
 
   loadMap(sourceInput: BotLibraryMapInput | (() => BotLibraryMapInput)): number {
     this.requireLive();
+    const start = this.debugBuild ? this.options.milliseconds() : 0;
     if (!this.checkSetup("BotLoadMap")) return 1;
     this.print(1, "------------ Map Loading ------------\n");
     this.requireLive();
@@ -307,6 +432,7 @@ export class BotLibrary {
     this.requireLive();
     this.print(1, "-------------------------------------\n");
     this.requireLive();
+    if (this.debugBuild) this.print(1, `map loaded in ${(this.options.milliseconds() - start) | 0} msec\n`);
     return 0;
   }
 
@@ -372,13 +498,23 @@ export class BotLibrary {
     const routing = new BotMovementRouting(this.moveStates, map.spatial, map.routing, {
       originOfMoverWithModelNum: model => aas.entities.originOfMoverWithModelNum(model),
       entityModelNum: entity => aas.entities.entityModelNum(entity),
-    });
+    }, this.debugBuild ? { debug: true, developer: () => this.developerValue !== 0 } : undefined);
+    const drawing = this.options.movementProfile ?? this.options.debugProfile;
+    const diagnostics: BotMovementDebugOptions | undefined = drawing === undefined ? undefined : {
+      ...this.options.movementProfile,
+      debug: this.debugBuild,
+      clearLines: () => { drawing.geometry.lines.clear(); },
+      printTravelType: type => { drawing.geometry.printTravelType(type); },
+      showReachability: reach => { drawing.geometry.showReachability(map.spatial, reach); },
+      lineCreate: () => drawing.createLine(),
+      lineShow: (line, start, end, color) => { drawing.showLine(line, start, end, color); },
+    };
     const movement = new BotMovement(routing, this.actions, {
       random: this.random, developer: () => this.developerValue !== 0,
       nextEntity: after => aas.entities.nextEntity(after),
       entityType: entity => aas.entities.entityType(entity),
       entityWeapon: entity => aas.entities.info(entity).weapon,
-    });
+    }, diagnostics, this.movementDebugState);
     this.mapMovement = { map, routing, movement };
   }
 

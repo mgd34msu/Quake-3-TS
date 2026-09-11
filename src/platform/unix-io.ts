@@ -7,7 +7,7 @@ import { lookup } from "node:dns/promises";
 import { writeSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { ReadStream } from "node:tty";
-import { CvarRegistry } from "../core/cvar.ts";
+import { CvarFlag, CvarRegistry } from "../core/cvar.ts";
 import type { EditField } from "../core/edit-field.ts";
 import { sourceCommandText } from "../core/text.ts";
 import type { CommonSystemEvent } from "../engine/common-events.ts";
@@ -191,7 +191,7 @@ function ownedAddress(address: Ipv4Address): Ipv4Address {
   const length = source.length, a = source[0], b = source[1], c = source[2], d = source[3];
   const host: Ipv4Host = [a, b, c, d];
   if (length !== 4 || host.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)
-    || !Number.isInteger(port) || port < 1 || port > 65535) {
+    || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new RangeError("Dedicated packet requires a valid IPv4 sender");
   }
   return Object.freeze({ kind: "ipv4", host: Object.freeze(host), port });
@@ -219,6 +219,7 @@ export class UnixIo {
   private readonly signals: "process" | "none" | UnixSignalRuntime;
   private readonly emptyLan = new LanAddresses([]);
   private network: NetworkState = { kind: "uninitialized" };
+  private initializingUdp: UdpTransport | null = null;
   private console: ConsoleState = { kind: "uninitialized" };
   private events: UnixQueuedSystemEvent[] = [];
   private line = "";
@@ -430,6 +431,12 @@ export class UnixIo {
     this.network = { kind: "initializing" };
     let candidate: UdpTransport | null = null;
     try {
+      const flags = CvarFlag.Archive | CvarFlag.Latch;
+      const socksEnabled = cvars.register("net_socksEnabled", "0", flags).integerValue !== 0;
+      const socksServer = cvars.register("net_socksServer", "", flags).value;
+      const socksPort = cvars.register("net_socksPort", "1080", flags).integerValue & 65535;
+      const socksUsername = cvars.register("net_socksUsername", "", flags).value;
+      const socksPassword = cvars.register("net_socksPassword", "", flags).value;
       if (cvars.register("net_noudp", "0").numericValue !== 0) {
         this.network = { kind: "ready", udp: null, lan: this.emptyLan };
         return;
@@ -457,19 +464,35 @@ export class UnixIo {
           continue;
         }
         this.requireOpen();
+        this.initializingUdp = candidate;
+        if (socksEnabled) {
+          await candidate.connectSocks({ server: socksServer, port: socksPort, username: socksUsername, password: socksPassword });
+          this.requireOpen();
+        }
         const lan = LanAddresses.current();
         // Explicit port0 is a verifier adaptation. PORT_ANY(-1) retains source cvar semantics.
         cvars.set("net_port", String(requested === 0 ? candidate.address.port : requested), true);
         this.network = { kind: "ready", udp: candidate, lan };
         candidate = null;
+        this.initializingUdp = null;
         return;
       }
       throw new Error("Couldn't allocate IP port");
     } catch (error) {
       candidate?.close();
+      this.initializingUdp = null;
       if (!this.isClosed()) this.network = { kind: "uninitialized" };
       throw error;
     }
+  }
+
+  async restartNetwork(cvars: CvarRegistry): Promise<void> {
+    this.requireOpen();
+    if (this.network.kind !== "ready") throw new Error("Network restart requires initialized networking");
+    const udp = this.network.udp;
+    this.network = { kind: "uninitialized" };
+    udp?.close();
+    await this.initializeNetwork(cvars);
   }
 
   initializeConsole(cvars: CvarRegistry): void {
@@ -667,6 +690,7 @@ export class UnixIo {
       release(() => { if (this.stdin.listenerCount("readable") === 0 && this.stdin.listenerCount("data") === 0) releaseStdinReference?.(); });
     }
     release(() => { udp?.close(); });
+    release(() => { this.initializingUdp?.close(); this.initializingUdp = null; });
     release(() => { releaseJobControlSignals?.(); });
     release(() => { releaseSignals?.(); });
     if (errors.length > 0) throw new AggregateError(errors, "Dedicated input cleanup failed", { cause: errors[0] });

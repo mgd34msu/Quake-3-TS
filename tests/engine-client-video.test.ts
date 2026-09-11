@@ -190,8 +190,8 @@ test.skipIf(dataPath === undefined)("actual client snapshot zero supplies center
           snapshot: { ...snapshot, messageNumber: 0, serverTime: 1000, deltaNumber: -1, parseEntitiesNumber: 0,
             playerState, entities: [] } }], context(0)) },
       ]);
-      const directory = join(current.common.roots.homePath, "baseq3/demos");
-      await mkdir(directory, { recursive: true }); await writeFile(join(directory, "snapshot-zero.dm_68"), demo);
+      const directory = Buffer.concat([current.common.roots.homePath.resolvedBytes(), Buffer.from("/baseq3/demos")]);
+      await mkdir(directory, { recursive: true }); await writeFile(Buffer.concat([directory, Buffer.from("/snapshot-zero.dm_68")]), demo);
       current.common.commands.append("set cl_freezeDemo 1\ndemo snapshot-zero.dm_68\n");
     });
     current.common.commands.append("prepare_snapshot_zero_demo\n");

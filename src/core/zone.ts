@@ -1,6 +1,7 @@
 // Ported from id Software's code/qcommon/common.c zone allocator.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import { CommonError } from "./common-error.ts";
+import { captureAllocationProvenance } from "./allocation-provenance.ts";
 
 export enum ZoneTag {
   Free = 0,
@@ -23,6 +24,17 @@ export interface ZoneAllocation {
   readonly bytes: Uint8Array;
 }
 
+export interface AllocationProvenance {
+  readonly label: string;
+  readonly file: string;
+  readonly line: number;
+}
+
+/** Managed debug metadata does not change the release32 arena layout. */
+export interface ZoneDebugProfile {
+  onAllocationFailure(): void;
+}
+
 export interface ZoneMemoryInfo {
   readonly usedBytes: number;
   readonly blockCount: number;
@@ -32,6 +44,7 @@ export interface ZoneMemoryInfo {
 
 interface AllocationRecord {
   readonly offset: number;
+  readonly provenance: AllocationProvenance | null;
   bytes: Uint8Array | null;
 }
 
@@ -111,14 +124,14 @@ export class ZoneArena {
   private storage: ZoneStorage | null;
   private readonly allocations = new WeakMap<ZoneAllocation, AllocationRecord>();
 
-  constructor(byteLength: number, private readonly name: "main" | "small" = "main") {
+  constructor(byteLength: number, private readonly name: "main" | "small" = "main", private readonly debug?: ZoneDebugProfile) {
     if (!Number.isInteger(byteLength) || byteLength < ZONE_BYTES + BLOCK_BYTES || byteLength > 0x7fffffff) {
       throw new RangeError("Zone size must fit a source signed int and its zone and block headers");
     }
     this.storage = new ZoneStorage(byteLength);
   }
 
-  allocate(size: number, tag: number, clear = false): ZoneAllocation {
+  allocate(size: number, tag: number, clear = false, provenance: AllocationProvenance | null = null): ZoneAllocation {
     if (tag === 0) throw new CommonError("fatal", "Z_TagMalloc: tried to use a 0 tag");
     this.validateTag(tag);
     if (!Number.isInteger(size) || size < 0 || size > 0x7ffffffc - BLOCK_BYTES - 4) {
@@ -132,6 +145,7 @@ export class ZoneArena {
     let remaining = storage.blocks.size + 1;
     do {
       if (rover === start) {
+        this.debug?.onAllocationFailure();
         throw new CommonError("fatal", `Z_Malloc: failed on allocation of ${total} bytes from the ${this.name} zone`);
       }
       if (--remaining < 0) throw new CommonError("fatal", "Z_TagMalloc: corrupt block list");
@@ -159,7 +173,9 @@ export class ZoneArena {
     storage.view.setInt32(base.offset + base.size - 4, ZONE_ID, true);
     const bytes = storage.bytes.subarray(base.offset + BLOCK_BYTES, base.offset + BLOCK_BYTES + size);
     if (clear) bytes.fill(0);
-    const record: AllocationRecord = { offset: base.offset, bytes };
+    const record: AllocationRecord = { offset: base.offset, bytes,
+      provenance: this.debug === undefined ? null : provenance === null
+        ? captureAllocationProvenance("Z_TagMalloc") : { ...provenance } };
     const allocation: ZoneAllocation = {
       get bytes(): Uint8Array {
         if (record.bytes === null) throw new CommonError("fatal", "Zone allocation is no longer valid");
@@ -202,6 +218,11 @@ export class ZoneArena {
     return (storage.view.getInt32(0, true) - storage.used) | 0;
   }
 
+  ownsLiveAllocation(allocation: ZoneAllocation): boolean {
+    const record = this.allocations.get(allocation);
+    return record !== undefined && record.bytes !== null;
+  }
+
   get byteLength(): number { return this.requireStorage("Com_Meminfo_f").bytes.byteLength; }
 
   /** Com_Meminfo_f; zone+ offsets identify actual arena headers, not native pointers. */
@@ -229,16 +250,29 @@ export class ZoneArena {
     return { usedBytes, blockCount, botlibBytes, rendererBytes };
   }
 
-  /** Z_LogZoneHeap's release branch intentionally stops before the final block. */
+  /** Z_LogZoneHeap intentionally stops before the final block in both profiles. */
   logHeap(name: string, write: (text: string) => void): void {
     const storage = this.requireStorage("Z_LogZoneHeap");
-    let size = 0, count = 0;
+    let size = 0, count = 0, requested = 0;
     write(`\r\n================\r\n${name} log\r\n================\r\n`);
     for (let block = storage.block(storage.sentinel.next); block.next !== storage.sentinel.offset; block = storage.block(block.next)) {
-      if (block.tag !== 0) { size = (size + block.size) | 0; count++; }
+      if (block.tag !== 0) {
+        size = (size + block.size) | 0; count++;
+        if (this.debug !== undefined && block.allocation !== null) {
+          const allocation = block.allocation;
+          const bytes = allocation.bytes;
+          if (bytes === null) throw new CommonError("fatal", "Z_LogZoneHeap: invalid allocation");
+          requested = (requested + bytes.length) | 0;
+          let dump = "";
+          for (const byte of bytes.subarray(0, 20)) dump += byte >= 32 && byte < 127 ? String.fromCharCode(byte) : "_";
+          const origin = allocation.provenance;
+          const location = origin === null ? "<unattributed>" : `${origin.file}, line: ${origin.line} (${origin.label})`;
+          write(`size = ${String(bytes.length).padStart(8)}: ${location} [${dump}]\r\n`);
+        }
+      }
     }
     write(`${size} ${name} memory in ${count} blocks\r\n`);
-    write(`${(size - count * BLOCK_BYTES) | 0} ${name} memory overhead\r\n`);
+    write(`${(size - (this.debug === undefined ? count * BLOCK_BYTES : requested)) | 0} ${name} memory overhead\r\n`);
   }
 
   checkHeap(): void {

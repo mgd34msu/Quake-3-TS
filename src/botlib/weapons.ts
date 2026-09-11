@@ -9,7 +9,8 @@ import type { Vec3 } from "../core/math.ts";
 import { CommonError } from "../core/common-error.ts";
 import { ScriptLanguageError, type ScriptDiagnostic, type ScriptToken, type SourceLocation } from "../script/lexer.ts";
 import { ScriptSourceReader, type ScriptPreprocessorOptions } from "../script/preprocessor.ts";
-import { StructureReader, type StructureField } from "../script/structure.ts";
+import { StructureReader, StructureFieldType, writeStructure, type StructureDefinition, type StructureField, type StructureFieldDefinition } from "../script/structure.ts";
+import type { BotLog } from "./log.ts";
 import {
   WeightConfigError,
   WeightConfigLoadError,
@@ -90,6 +91,7 @@ export interface WeaponConfig {
   readonly projectiles: readonly ProjectileInfo[];
   readonly diagnostics: readonly ScriptDiagnostic[];
   weaponBytes(index: number): Uint8Array;
+  projectileBytes(index: number): Uint8Array;
   weaponInfo(index: number): WeaponInfo;
   free(): void;
 }
@@ -100,6 +102,7 @@ export interface WeaponAiHost {
 }
 
 export interface WeaponAiOptions {
+  readonly debug?: { readonly log: Pick<BotLog, "filePointer" | "flush"> };
   readonly memory?: BotMemory;
   readonly maxWeaponInfo?: number | (() => number);
   readonly maxProjectileInfo?: number | (() => number);
@@ -312,6 +315,58 @@ function freezeWeapon(weapon: WeaponInfo, projectileInfo: ProjectileInfo, valid:
 const WEAPON_CONFIG_BYTES = 16;
 const WEAPON_INFO_BYTES = 552;
 const PROJECTILE_INFO_BYTES = 208;
+
+function dumpField(name: string, offset: number, type: number, maxarray = 0): StructureFieldDefinition {
+  return { name, offset, type, maxarray, floatmin: 0, floatmax: 0, substruct: null };
+}
+
+const projectileDumpDefinition: StructureDefinition = {
+  size: PROJECTILE_INFO_BYTES,
+  fields: [
+    dumpField("name", 0, StructureFieldType.String),
+    dumpField("model", 88, StructureFieldType.String),
+    dumpField("flags", 160, StructureFieldType.Int),
+    dumpField("gravity", 164, StructureFieldType.Float),
+    dumpField("damage", 168, StructureFieldType.Int),
+    dumpField("radius", 172, StructureFieldType.Float),
+    dumpField("visdamage", 176, StructureFieldType.Int),
+    dumpField("damagetype", 180, StructureFieldType.Int),
+    dumpField("healthinc", 184, StructureFieldType.Int),
+    dumpField("push", 188, StructureFieldType.Float),
+    dumpField("detonation", 192, StructureFieldType.Float),
+    dumpField("bounce", 196, StructureFieldType.Float),
+    dumpField("bouncefric", 200, StructureFieldType.Float),
+    dumpField("bouncestop", 204, StructureFieldType.Float),
+  ],
+};
+
+const weaponDumpDefinition: StructureDefinition = {
+  size: WEAPON_INFO_BYTES,
+  fields: [
+    dumpField("number", 4, StructureFieldType.Int),
+    dumpField("name", 8, StructureFieldType.String),
+    dumpField("level", 168, StructureFieldType.Int),
+    dumpField("model", 88, StructureFieldType.String),
+    dumpField("weaponindex", 172, StructureFieldType.Int),
+    dumpField("flags", 176, StructureFieldType.Int),
+    dumpField("projectile", 180, StructureFieldType.String),
+    dumpField("numprojectiles", 260, StructureFieldType.Int),
+    dumpField("hspread", 264, StructureFieldType.Float),
+    dumpField("vspread", 268, StructureFieldType.Float),
+    dumpField("speed", 272, StructureFieldType.Float),
+    dumpField("acceleration", 276, StructureFieldType.Float),
+    dumpField("recoil", 280, StructureFieldType.Float | StructureFieldType.Array, 3),
+    dumpField("offset", 292, StructureFieldType.Float | StructureFieldType.Array, 3),
+    dumpField("angleoffset", 304, StructureFieldType.Float | StructureFieldType.Array, 3),
+    dumpField("extrazvelocity", 316, StructureFieldType.Float),
+    dumpField("ammoamount", 320, StructureFieldType.Int),
+    dumpField("ammoindex", 324, StructureFieldType.Int),
+    dumpField("activate", 328, StructureFieldType.Float),
+    dumpField("reload", 332, StructureFieldType.Float),
+    dumpField("spinup", 336, StructureFieldType.Float),
+    dumpField("spindown", 340, StructureFieldType.Float),
+  ],
+};
 
 class WeaponConfigCell {
   constructor(private readonly allocation: BotMemoryAllocation, private readonly offset: number) {}
@@ -573,6 +628,13 @@ class WeaponConfigParser {
         const start = weaponOffset(index);
         return allocation.bytes.subarray(start, start + WEAPON_INFO_BYTES);
       },
+      projectileBytes(index: number): Uint8Array {
+        const start = ((WEAPON_CONFIG_BYTES + Math.imul(this.weaponCapacity, WEAPON_INFO_BYTES)) >>> 0) + index * PROJECTILE_INFO_BYTES;
+        if (!Number.isInteger(index) || index < 0 || index >= this.projectiles.length || start + PROJECTILE_INFO_BYTES > allocation.bytes.length) {
+          throw new RangeError("projectile dump exceeds the source configuration allocation");
+        }
+        return allocation.bytes.subarray(start, start + PROJECTILE_INFO_BYTES);
+      },
       weaponInfo(index: number): WeaponInfo { return Object.freeze(weaponConfigView(allocation, weaponOffset(index))); },
       free: this.freeConfig,
     });
@@ -764,9 +826,11 @@ export class WeaponAi {
   private currentConfig: WeaponConfig | undefined;
   private generation = 0;
   private setupRevision = 0;
+  private readonly debug: WeaponAiOptions["debug"];
 
   constructor(host: WeaponAiHost, options: WeaponAiOptions = {}) {
     this.host = host;
+    this.debug = options.debug;
     this.memory = options.memory ?? new BotMemory();
     this.report = options.report;
     const weapons = typeof options.maxWeaponInfo === "function"
@@ -823,6 +887,10 @@ export class WeaponAi {
         projectiles.value,
         {
           ...this.preprocessorOptions,
+          ...(this.host.resolver.debugEval === undefined ? {} : { debugEval: (text: string) => {
+            try { this.host.resolver.debugEval?.(text); }
+            catch (error) { diagnosticCallbackAborted = true; throw error; }
+          } }),
           report: diagnostic => {
             try { this.preprocessorOptions.report?.(diagnostic); }
             catch (error) { diagnosticCallbackAborted = true; throw error; }
@@ -852,6 +920,20 @@ export class WeaponAi {
     this.emit("message", `loaded ${config.path}`, config.path);
     if (!current()) return WeaponLoadResult.CannotLoadWeaponConfig;
     this.currentConfig = config;
+    if (this.debug !== undefined) {
+      const file = this.debug.log.filePointer();
+      if (file !== null) {
+        const write = (text: string): number => file.write(text) ?? text.length;
+        for (let index = 0; index < config.projectiles.length; index++) {
+          writeStructure(write, projectileDumpDefinition, config.projectileBytes(index));
+          this.debug.log.flush();
+        }
+        for (let index = 0; index < config.weaponCapacity; index++) {
+          writeStructure(write, weaponDumpDefinition, config.weaponBytes(index));
+          this.debug.log.flush();
+        }
+      }
+    }
     return WeaponLoadResult.NoError;
   }
 

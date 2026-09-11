@@ -65,10 +65,10 @@ test("common restart preserves its writer and zero-size rows, retires old mounts
   log.close();
   expect(() => files.current).toThrow();
   expect(() => files.writable.openBotLog("late.log")).toThrow("closed");
-  expect(await Bun.file(join(files.roots.homePath, "baseq3", "late.log")).exists()).toBe(false);
+  expect(await Bun.file(Buffer.concat([files.roots.homePath.resolvedBytes(), Buffer.from("/baseq3/late.log")])).exists()).toBe(false);
 });
 
-test("a rejected remount cannot restore old mounts or publish new mounts", async () => {
+test("a rejected remount retains the reached new mount without restoring old mounts", async () => {
   const files = await create();
   const before = files.current;
   const log = files.writable.openWrite("survivor.log", false);
@@ -79,11 +79,12 @@ test("a rejected remount cannot restore old mounts or publish new mounts", async
     calls++;
     if (calls === 3) throw failure;
   });
-  expect(() => files.current).toThrow();
+  const reached = files.current;
+  expect(reached === before).toBe(false);
   expect(() => before.has("default.cfg")).toThrow();
   await expect(remount).rejects.toBe(failure);
   expect(calls).toBe(3);
-  expect(() => files.current).toThrow();
+  expect(files.current === reached).toBe(true);
   log.write("still common-owned\n");
   files.close();
   expect(() => log.write("closed")).toThrow();
@@ -92,7 +93,7 @@ test("a rejected remount cannot restore old mounts or publish new mounts", async
 test("unique direct reads retain independent packed and loose cursors across common restart", async () => {
   const files = await create();
   const encoder = new TextEncoder();
-  await writeFile(join(files.roots.dataPath, "baseq3", "streams.pk3"), sourceZip([
+  await writeFile(Buffer.concat([files.roots.dataPath.resolvedBytes(), Buffer.from("/baseq3/streams.pk3")]), sourceZip([
     { name: encoder.encode("music/intro.wav"), data: encoder.encode("01234567"), method: 8, utf8: false },
     { name: encoder.encode("demos/run.dm_68"), data: encoder.encode("abcdefgh"), method: 0, utf8: false },
   ]));
@@ -134,7 +135,7 @@ test("closing during an actual remount prevents late publication and releases sh
   const pending = files.restart({ checksumFeed: 5, random: () => 0 }, () => {});
   await expect(files.restart({ checksumFeed: 6, random: () => 0 }, () => {})).rejects.toThrow("awaited");
   files.close();
-  await expect(pending).rejects.toThrow("closed");
+  await expect(pending).rejects.toThrow("retired");
   expect(() => files.current).toThrow();
   expect(() => log.write("closed")).toThrow();
 });

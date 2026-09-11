@@ -15,6 +15,30 @@ export interface AasFileWriteHost {
 
 const HEADER_SIZE = 124;
 
+/** AAS_FileInfo, including the source's fixed current format version label. */
+export function printAasFileInfo(world: AasWorld, print: (severity: 1, text: string) => undefined): void {
+  const counts: readonly [string, number][] = [
+    ["version", 5], ["numvertexes", world.vertices.length], ["numplanes", world.planes.length],
+    ["numedges", world.edges.length], ["edgeindexsize", world.edgeIndexes.length],
+    ["numfaces", world.faces.length], ["faceindexsize", world.faceIndexes.length],
+    ["numareas", world.areas.length], ["numareasettings", world.areaSettings.length],
+    ["reachabilitysize", world.reachability.length], ["numnodes", world.nodes.length],
+    ["numportals", world.portals.length], ["portalindexsize", world.portalIndex.length],
+    ["numclusters", world.clusters.length],
+    ["num grounded areas", world.areaSettings.filter(settings => (settings.flags & 1) !== 0).length],
+  ];
+  for (const [label, count] of counts) print(1, `${label} = ${count}\n`);
+  const sizes: readonly [string, number][] = [
+    ["planes", world.planes.length * 20], ["areas", world.areas.length * 48],
+    ["areasettings", world.areaSettings.length * 28], ["nodes", world.nodes.length * 12],
+    ["reachability", world.reachability.length * 44], ["portals", world.portals.length * 20],
+    ["clusters", world.clusters.length * 16],
+  ];
+  let optimized = 0;
+  for (const [label, size] of sizes) { print(1, `${label} size ${size} bytes\n`); optimized = (optimized + size) | 0; }
+  print(1, `optimzed size ${optimized >> 10} KB\n`);
+}
+
 function vector(writer: BinaryWriter, value: Vec3): void {
   writer.f32(value.x);
   writer.f32(value.y);

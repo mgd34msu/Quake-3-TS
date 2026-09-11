@@ -26,8 +26,10 @@ function moverBottomCenter(context: BotTravelContext, reach: AasReachability): V
 export function travelElevator(context: BotTravelContext, state: BotMoveState, reach: AasReachability): BotMoveResult {
   const result = new BotMoveResult();
   if (context.routing.onMover(state.origin, state.entityNum, reach)) {
+    if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot on elevator\n");
     // The source calls integer abs(), truncating the float subtraction first.
     if (Math.abs(Math.trunc(f(state.origin.z - reach.end.z))) < context.variable("svMaxBarrier").value) {
+      if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot moving to end\n");
       const direction = normalize3(vec3(reach.end.x - state.origin.x, reach.end.y - state.origin.y, 0));
       if (!context.checkBarrierJump(state, direction, 100)) context.actions.move(state.client, direction, 400);
       result.moveDirection = direction;
@@ -37,6 +39,7 @@ export function travelElevator(context: BotTravelContext, state: BotMoveState, r
       let distance = length3(offset);
       const direction = normalize3(offset);
       if (distance > 10) {
+        if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot moving to center\n");
         if (distance > 100) distance = 100;
         context.actions.move(state.client, direction, f(400 - f(400 - f(4 * distance))));
         result.moveDirection = direction;
@@ -44,6 +47,7 @@ export function travelElevator(context: BotTravelContext, state: BotMoveState, r
     }
     return result;
   }
+  if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot not on elevator\n");
   let direction = sub3(reach.end, state.origin);
   let distance = length3(direction);
   if (distance < 64) {
@@ -61,6 +65,7 @@ export function travelElevator(context: BotTravelContext, state: BotMoveState, r
   const startDirection = state.moveFlags & BotMoveFlag.SWIMMING ? startOffset : vec3(startOffset.x, startOffset.y, 0);
   const startDistance = length3(startDirection), first = normalize3(startDirection);
   if (!context.routing.moverDown(reach)) {
+    if (context.diagnostics?.elevator) context.routing.states.host.print(1, "elevator not down\n");
     distance = startDistance;
     direction = first;
     context.checkBlocked(state, direction, false, result);
@@ -79,9 +84,11 @@ export function travelElevator(context: BotTravelContext, state: BotMoveState, r
   const centerDirection = state.moveFlags & BotMoveFlag.SWIMMING ? centerOffset : vec3(centerOffset.x, centerOffset.y, 0);
   const centerDistance = length3(centerDirection), second = normalize3(centerDirection);
   if (startDistance < 20 || centerDistance < startDistance || dot3(first, second) < 0) {
+    if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot moving to center\n");
     distance = centerDistance;
     direction = second;
   } else {
+    if (context.diagnostics?.elevator) context.routing.states.host.print(1, "bot moving to start\n");
     distance = startDistance;
     direction = first;
   }
@@ -135,8 +142,10 @@ function funcBobStartEnd(context: BotTravelContext, reach: AasReachability): {
 export function travelFuncBobbing(context: BotTravelContext, state: BotMoveState, reach: AasReachability): BotMoveResult {
   const result = new BotMoveResult(), bob = funcBobStartEnd(context, reach);
   if (context.routing.onMover(state.origin, state.entityNum, reach)) {
+    if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot on func_bobbing\n");
     if (bob.origin === null) throw new Error("BotTravel_FuncBobbing consumes an undefined mover origin");
     if (length3(sub3(bob.origin, bob.end)) < 24) {
+      if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot moving to reachability end\n");
       const direction = normalize3(vec3(reach.end.x - state.origin.x, reach.end.y - state.origin.y, 0));
       if (!context.checkBarrierJump(state, direction, 100)) context.actions.move(state.client, direction, 400);
       result.moveDirection = direction;
@@ -146,6 +155,7 @@ export function travelFuncBobbing(context: BotTravelContext, state: BotMoveState
       let distance = length3(offset);
       const direction = normalize3(offset);
       if (distance > 10) {
+        if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot moving to func_bobbing center\n");
         if (distance > 100) distance = 100;
         context.actions.move(state.client, direction, f(400 - f(400 - f(4 * distance))));
         result.moveDirection = direction;
@@ -153,9 +163,11 @@ export function travelFuncBobbing(context: BotTravelContext, state: BotMoveState
     }
     return result;
   }
+  if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot not ontop of func_bobbing\n");
   let direction = sub3(reach.end, state.origin);
   let distance = length3(direction);
   if (distance < 64) {
+    if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot moving to end\n");
     if (distance > 60) distance = 60;
     const speed = f(360 - f(360 - f(6 * distance)));
     if ((state.moveFlags & BotMoveFlag.SWIMMING) || !context.checkBarrierJump(state, direction, 50)) {
@@ -171,6 +183,7 @@ export function travelFuncBobbing(context: BotTravelContext, state: BotMoveState
   const startDistance = length3(startDirection), first = normalize3(startDirection);
   if (bob.origin === null) throw new Error("BotTravel_FuncBobbing consumes an undefined mover origin");
   if (length3(sub3(bob.origin, bob.start)) > 16) {
+    if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "func_bobbing not at start\n");
     distance = startDistance;
     direction = first;
     context.checkBlocked(state, direction, false, result);
@@ -189,9 +202,11 @@ export function travelFuncBobbing(context: BotTravelContext, state: BotMoveState
   const centerDirection = state.moveFlags & BotMoveFlag.SWIMMING ? centerOffset : vec3(centerOffset.x, centerOffset.y, 0);
   const centerDistance = length3(centerDirection), second = normalize3(centerDirection);
   if (startDistance < 20 || centerDistance < startDistance || dot3(first, second) < 0) {
+    if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot moving to func_bobbing center\n");
     distance = centerDistance;
     direction = second;
   } else {
+    if (context.diagnostics?.funcBob) context.routing.states.host.print(1, "bot moving to reachability start\n");
     distance = startDistance;
     direction = first;
   }
@@ -255,6 +270,7 @@ export function* resetGrappleCalls(context: BotTravelContext, state: BotMoveStat
       if (context.variable("offhandGrapple").value !== 0) yield* context.actions.commandCalls(state.client, context.variable("grappleOffCommand").string);
       state.moveFlags &= ~BotMoveFlag.ACTIVEGRAPPLE;
       state.grappleVisibleTime = 0;
+      if (context.diagnostics?.grapple) context.routing.states.host.print(1, "reset grapple\n");
     }
   }
 }
@@ -264,6 +280,7 @@ export function travelGrapple(context: BotTravelContext, state: BotMoveState, re
 }
 
 export function* travelGrappleCalls(context: BotTravelContext, state: BotMoveState, reach: AasReachability): CallSteps<BotMoveResult> {
+  if (context.diagnostics?.grapple) context.diagnostics.showGrapple(reach);
   const result = new BotMoveResult();
   if (state.moveFlags & BotMoveFlag.GRAPPLERESET) {
     if (context.variable("offhandGrapple").value !== 0) yield* context.actions.commandCalls(state.client, context.variable("grappleOffCommand").string);
@@ -275,10 +292,12 @@ export function* travelGrappleCalls(context: BotTravelContext, state: BotMoveSta
     result.flags |= BotMoveResultFlag.MOVEMENTWEAPON;
   }
   if (state.moveFlags & BotMoveFlag.ACTIVEGRAPPLE) {
+    if (context.diagnostics?.grapple) context.routing.states.host.print(1, "BotTravel_Grapple: active grapple\n");
     const hookState = grappleState(context, state);
     const distance = length3(vec3(reach.end.x - state.origin.x, reach.end.y - state.origin.y, 0));
     if (hookState !== 0 && distance < 48) {
       if (f(state.lastGrappleDistance - distance) < 1) {
+        if (context.diagnostics?.grapple) context.routing.states.host.print(3, "grapple normal end\n");
         if (context.variable("offhandGrapple").value !== 0) yield* context.actions.commandCalls(state.client, context.variable("grappleOffCommand").string);
         state.moveFlags &= ~BotMoveFlag.ACTIVEGRAPPLE;
         state.moveFlags |= BotMoveFlag.GRAPPLERESET;
@@ -287,6 +306,7 @@ export function* travelGrappleCalls(context: BotTravelContext, state: BotMoveSta
       }
     } else if (hookState === 0 || (hookState === 2 && distance > f(state.lastGrappleDistance - 2))) {
       if (state.grappleVisibleTime < f(context.routing.states.host.time()) - 0.4) {
+        if (context.diagnostics?.grapple) context.routing.states.host.print(3, "grapple not visible\n");
         if (context.variable("offhandGrapple").value !== 0) yield* context.actions.commandCalls(state.client, context.variable("grappleOffCommand").string);
         state.moveFlags &= ~BotMoveFlag.ACTIVEGRAPPLE;
         state.moveFlags |= BotMoveFlag.GRAPPLERESET;
@@ -299,6 +319,7 @@ export function* travelGrappleCalls(context: BotTravelContext, state: BotMoveSta
     if (Math.trunc(context.variable("offhandGrapple").value) === 0) context.actions.attack(state.client);
     state.lastGrappleDistance = distance;
   } else {
+    if (context.diagnostics?.grapple) context.routing.states.host.print(1, "BotTravel_Grapple: inactive grapple\n");
     state.grappleVisibleTime = f(context.routing.states.host.time());
     const offset = sub3(reach.start, state.origin);
     const moveOffset = state.moveFlags & BotMoveFlag.SWIMMING ? offset : vec3(offset.x, offset.y, 0);
@@ -308,6 +329,7 @@ export function* travelGrappleCalls(context: BotTravelContext, state: BotMoveSta
     result.flags |= BotMoveResultFlag.MOVEMENTVIEW;
     if (distance < 5 && Math.abs(movementAngleDifference(result.idealViewAngles.x, state.viewAngles.x)) < 2
       && Math.abs(movementAngleDifference(result.idealViewAngles.y, state.viewAngles.y)) < 2) {
+      if (context.diagnostics?.grapple) context.routing.states.host.print(1, "BotTravel_Grapple: activating grapple\n");
       const trace = context.routing.spatial.host.trace(add3(state.origin, state.viewOffset), reach.end, null, state.entityNum, 1);
       if (length3(sub3(reach.end, trace.end)) > 16) { result.failure = true; return result; }
       if (context.variable("offhandGrapple").value !== 0) yield* context.actions.commandCalls(state.client, context.variable("grappleOnCommand").string);

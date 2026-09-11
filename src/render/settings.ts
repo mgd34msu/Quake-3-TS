@@ -9,6 +9,23 @@ import type { FinishShaderProfile } from "./material-finish.ts";
 import type { SceneSubmissionLimits } from "./scene-submission.ts";
 import type { SourceFlareSettings } from "./flares.ts";
 
+export type SourceRendererHardware = "generic" | "3dfx2d3d" | "riva128" | "ragepro" | "permedia2";
+export type SourceRendererDriver = "icd" | "standalone" | "voodoo";
+
+function rendererHardware(value: string): SourceRendererHardware {
+  switch (value) {
+    case "generic": case "3dfx2d3d": case "riva128": case "ragepro": case "permedia2": return value;
+    default: throw new RangeError(`Unknown r_hardwareProfile: ${value}`);
+  }
+}
+
+function rendererDriver(value: string): SourceRendererDriver {
+  switch (value) {
+    case "icd": case "standalone": case "voodoo": return value;
+    default: throw new RangeError(`Unknown r_driverProfile: ${value}`);
+  }
+}
+
 export interface RendererRuntimeSettings {
   readonly clear: boolean;
   readonly smpRequested: boolean;
@@ -28,6 +45,7 @@ export interface RendererRuntimeSettings {
 }
 
 export interface RendererSettings {
+  readonly hardwareType: SourceRendererHardware;
   readonly flares: SourceFlareSettings;
   registrationProfile(): FinishShaderProfile;
   bspProfile(): RendererBspSettings;
@@ -267,6 +285,8 @@ export class RegisteredRendererCvars {
       ["cg_shadows", "1", CvarFlag.None],
       ["r_maxpolys", "600", CvarFlag.None],
       ["r_maxpolyverts", "3000", CvarFlag.None],
+      ["r_hardwareProfile", "generic", ARCHIVE_LATCH],
+      ["r_driverProfile", "icd", ARCHIVE_LATCH],
     ];
     for (const [name, defaultValue, flags] of registrations) {
       registry.register(name, defaultValue, flags);
@@ -281,6 +301,8 @@ export class RegisteredRendererCvars {
 }
 
 export class SourceRendererSettings implements RendererSettings {
+  readonly hardwareType: SourceRendererHardware;
+  readonly driverType: SourceRendererDriver;
   readonly flares: SourceFlareSettings;
   readonly runtime: RendererSettings["runtime"];
   readonly visibility: RendererVisibilitySettings;
@@ -297,6 +319,9 @@ export class SourceRendererSettings implements RendererSettings {
     const cvars = registered.cvars;
     this.cvars = cvars;
     this.print = registered.print;
+    const hardware = rendererHardware(this.required("r_hardwareProfile").value);
+    this.hardwareType = hardware;
+    this.driverType = rendererDriver(this.required("r_driverProfile").value);
     this.flares = {
       get enabled(): boolean {
         const value = cvars.get("r_flares");
@@ -485,7 +510,7 @@ export class SourceRendererSettings implements RendererSettings {
       get dynamicLights(): boolean {
         const dynamicLight = cvars.find("r_dynamiclight"), vertexLight = cvars.find("r_vertexlight");
         if (dynamicLight === undefined || vertexLight === undefined) throw new Error("Renderer dynamic-light cvars are not registered");
-        return dynamicLight.integerValue !== 0 && vertexLight.integerValue !== 1;
+        return dynamicLight.integerValue !== 0 && vertexLight.integerValue !== 1 && hardware !== "permedia2";
       },
       get noPortals(): boolean {
         const value = cvars.find("r_noportals");
@@ -545,7 +570,7 @@ export class SourceRendererSettings implements RendererSettings {
       get vertexLighting(): boolean {
         const vertexLight = cvars.find("r_vertexlight"), uiFullscreen = cvars.find("r_uifullscreen");
         if (vertexLight === undefined || uiFullscreen === undefined) throw new Error("Renderer vertex-lighting cvars are not registered");
-        return vertexLight.integerValue !== 0 && uiFullscreen.integerValue === 0;
+        return (vertexLight.integerValue !== 0 && uiFullscreen.integerValue === 0) || hardware === "permedia2";
       },
       get polygonOffset(): { readonly factor: number; readonly units: number } {
         const factor = cvars.get("r_offsetfactor"), units = cvars.get("r_offsetunits");
@@ -560,12 +585,12 @@ export class SourceRendererSettings implements RendererSettings {
       detailTextures: this.enabled("r_detailtextures"),
       vertexLight: this.enabled("r_vertexLight"),
       uiFullscreen: this.enabled("r_uifullscreen"),
-      hardware: "generic",
+      hardware: this.hardwareType === "permedia2" ? "permedia2" : "generic",
       iterator: {
         ignoreFastPath: this.enabled("r_ignoreFastPath"),
         multitexture: this.initializedMultitexture,
         textureEnvAdd: this.initializedTextureEnvAdd,
-        driver: "generic",
+        driver: this.driverType === "voodoo" ? "voodoo" : "generic",
       },
     };
   }
@@ -636,6 +661,9 @@ export class SourceRendererSettings implements RendererSettings {
   get noBind(): boolean { return this.enabled("r_nobind"); }
   get drawBuffer(): string { return this.required("r_drawBuffer").value; }
   get textureMode(): CvarSnapshot { return this.required("r_textureMode"); }
+  textureModeProfile(): { readonly hardware: SourceRendererHardware; readonly print: (text: string) => void } {
+    return { hardware: this.hardwareType, print: this.print };
+  }
   clearTextureModeModified(): void { this.cvars.clearModified("r_textureMode"); }
   warnBadTextureMode(): void { this.print("bad filter name\n"); }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { NativeRoot } from "../src/assets/native-root.ts";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -23,7 +24,7 @@ describe("Unix GL call logging", () => {
     cvars.register("fs_basepath", base);
     const output: string[] = [], files = new WritableFileSystem({ homePath: home, product: "missionpack", print: () => {} });
     let clocks = 0;
-    const logging = new GlCallLogging({ cvars, openLog: path => files.openGlLog(path), print: text => { output.push(text); },
+    const logging = new GlCallLogging({ cvars, openLog: path => files.openGlLog(NativeRoot.fromSource(path)), print: text => { output.push(text); },
       localCalendar: () => { clocks++; return { year: 126, month: 8, day: 9, hour: 1, minute: 2, second: 3, weekday: 3, yearDay: 251, isDst: 1 }; } });
     try {
       expect(cvars.get("r_logFile")).toMatchObject({ value: "0", resetValue: "0", flags: CvarFlag.Cheat });
@@ -80,7 +81,7 @@ describe("Unix GL call logging", () => {
     mkdirSync(base); writeFileSync(untouched, "preserve these bytes"); symlinkSync(untouched, join(base, "gl.log"));
     const files = new WritableFileSystem({ homePath: join(root, "home"), product: "baseq3", print: () => {} });
     try {
-      expect(() => files.openGlLog(base)).toThrow("symbolic link");
+      expect(() => files.openGlLog(NativeRoot.fromHost(base))).toThrow("symbolic link");
       expect(readFileSync(untouched, "utf8")).toBe("preserve these bytes");
     } finally { files.closeAll(); rmSync(root, { recursive: true, force: true }); }
   });
@@ -595,6 +596,8 @@ describe("source renderer settings", () => {
       ["cg_shadows", "1", 0],
       ["r_maxpolys", "600", 0],
       ["r_maxpolyverts", "3000", 0],
+      ["r_hardwareProfile", "generic", 33],
+      ["r_driverProfile", "icd", 33],
     ];
     expect(cvars.registrations).toEqual([...expected]);
   });

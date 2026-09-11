@@ -4,6 +4,8 @@
  */
 import type { BotScriptSources } from "../../botlib/script-sources.ts";
 import { sourceCommandText } from "../../core/text.ts";
+import { isPrereleaseTeamArenaDemo, RETAIL_PRODUCT_PROFILE } from "../../core/product-profile.ts";
+import type { ProductProfile } from "../../core/product-profile.ts";
 import type { SystemClock } from "../../platform/system-clock.ts";
 import type { ScriptDiagnostic, ScriptToken } from "../../script/lexer.ts";
 import { UiMenuSourceParser, UiMenuTokenCursor, type UiMenuMemoryOwnership, type UiMenuRandom } from "../menu.ts";
@@ -15,6 +17,7 @@ import type { TeamArenaUiMemory } from "./memory.ts";
 import type { TeamArenaUiResources } from "./resources.ts";
 
 export interface TeamArenaUiMenuLoaderServices {
+  readonly productProfile?: ProductProfile;
   readonly memory: TeamArenaUiMemory;
   readonly resources: TeamArenaUiResources;
   readonly cvars: TeamArenaUiCvars;
@@ -109,8 +112,9 @@ export class TeamArenaUiMenuLoader {
       }
       this.services.memory.initializeStrings();
       this.services.runtime.resetDefinitions("strings"); this.current();
-      await gameInfo.parseGameInfo("gameinfo.txt"); this.current();
-      catalog.loadArenas(); this.current();
+      const demo = isPrereleaseTeamArenaDemo(this.services.productProfile ?? RETAIL_PRODUCT_PROFILE);
+      await gameInfo.parseGameInfo(demo ? "demogameinfo.txt" : "gameinfo.txt"); this.current();
+      if (!demo) { catalog.loadArenas(); this.current(); }
       await this.loadSet(menuSet.length === 0 ? "ui/menus.txt" : menuSet, true); this.current();
       await this.services.runtime.closeAll(); this.current();
       await this.services.runtime.activate(lastName ?? (() => {

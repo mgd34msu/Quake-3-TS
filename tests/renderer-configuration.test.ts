@@ -67,6 +67,7 @@ async function preSdlClientFixture(onPrint: (text: string) => void = () => {}) {
         sleep: async () => { throw new Error("Pre-SDL fixture must not wait on network input"); } },
     });
     client.bind({ common, events, loopback, io, server, assertCurrentOperation: () => {},
+      runRendererCallback: callback => callback(),
       pumpForDownloadsComplete: async () => { throw new Error("Pre-SDL fixture must not download"); } });
     await client.initialize();
     common.markInitialized();
@@ -362,12 +363,12 @@ describe("pre-SDL renderer registration", () => {
     try {
       f.common.commands.register("skinlist", () => {});
       await expect(f.client.startHunkUsers()).rejects.toThrow(failure);
-      expect(f.common.commands.registeredNames().slice(0, 3)).toEqual(["shaderlist", "imagelist", "skinlist"]);
+      expect(f.common.commands.registeredNames().slice(0, 4)).toEqual(["shaderlist", "imagelist", "toggle_renderer", "skinlist"]);
       for (const name of ["modellist", "modelist", "screenshot", "screenshotJPEG", "gfxinfo"])
         expect(f.common.commands.registeredNames()).not.toContain(name);
       expect(f.common.hunk.accounting.rendererBackend(0)).toBeNull();
       await f.client.shutdownAllForServerMap();
-      for (const name of ["shaderlist", "imagelist", "skinlist"]) expect(f.common.commands.registeredNames()).not.toContain(name);
+      for (const name of ["shaderlist", "imagelist", "toggle_renderer", "skinlist"]) expect(f.common.commands.registeredNames()).not.toContain(name);
       expect(open).not.toHaveBeenCalled();
     } finally { open.mockRestore(); await f.close(); }
   });
@@ -660,12 +661,13 @@ describe("actual renderer configuration", () => {
       cvars.set("r_textureMode", "gl_nearest"); cvars.set("r_gamma", "2"); events.length = 0;
       expect(f.renderer.pixels[0]).toBe(0);
       config.beginFrame(f.commands);
-      expect(events).toEqual(["clear r_textureMode: 255 nearest true true", "clear r_gamma: 255 nearest false true", "intensity: 255 nearest false false"]);
+      expect(events).toEqual(["clear r_measureOverdraw: 0 linear-mipmap-nearest true true",
+        "clear r_textureMode: 255 nearest true true", "clear r_gamma: 255 nearest false true", "intensity: 255 nearest false false"]);
       const after = config.imageUploadProfile();
       expect(after.colorMappings).not.toBe(before.colorMappings);
       expect(before.colorMappings.gammaTable[64]).toBe(64);
       expect(after.colorMappings.gammaTable[64]).toBe(128);
-      expect(f.commands.submit().commands).toBe(0);
+      expect(f.commands.submit()).toEqual({ commands: 1, views: 0, batches: 0 });
       config.beginFrame(f.commands);
       expect(config.imageUploadProfile().colorMappings).toBe(after.colorMappings);
       config.close(); expect(() => config.imageUploadProfile()).toThrow("closed");

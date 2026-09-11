@@ -3,18 +3,23 @@
 import { expect, test } from "bun:test";
 import type { BspMap } from "../../src/assets/bsp.ts";
 import { AasDebugLines } from "../../src/botlib/aas-debug.ts";
+import { AasDebugGeometry } from "../../src/botlib/aas-debug-geometry.ts";
+import type { ChatMatch } from "../../src/botlib/chat.ts";
 import { BotLibrary } from "../../src/botlib/library.ts";
 import { vec3 } from "../../src/core/math.ts";
 import { LinuxNativeRandom } from "../../src/core/native-random.ts";
-import { botPrintTeamGoal } from "../../src/game/ai-command.ts";
-import { BotLongTermGoal } from "../../src/game/ai-definitions.ts";
+import { botMatchReturnFlag, botPrintTeamGoal } from "../../src/game/ai-command.ts";
+import { botGetItemLongTermGoal } from "../../src/game/ai-decision.ts";
+import { BotLongTermGoal, BotMessage } from "../../src/game/ai-definitions.ts";
 import { GameAi } from "../../src/game/ai-main.ts";
+import { BotGoalState } from "../../src/game/ai-state.ts";
+import { botVoiceChatReturnFlag } from "../../src/game/ai-voice.ts";
 import { BotDebugPolygons } from "../../src/server/bot-debug.ts";
 import { GameType } from "../../src/shared/definitions.ts";
 import type { Product } from "../../src/shared/definitions.ts";
 import { createGameVerificationHarness } from "../../tools/game-verification-harness.ts";
 
-function fixture(product: Product) {
+function fixture(product: Product, debugBuild = false) {
   const bounds = { min: vec3(-128, -128, -128), max: vec3(128, 128, 128) };
   const map: BspMap = { entities: '{ "classname" "worldspawn" }', entityRecords: [], shaders: [], planes: [], nodes: [],
     leaves: [{ cluster: 0, area: 0, bounds, firstSurface: 0, surfaceCount: 0, firstBrush: 0, brushCount: 0 }],
@@ -24,9 +29,12 @@ function fixture(product: Product) {
     randomSeed: 42, buildDate: "Sep  9 2026", clientNamePrefix: "Human", botsReason: "Diagnostic fixture does not schedule AI" });
   const unused = (): never => { throw new Error("Team goal diagnostic must not call botlib or server services"); };
   const lines = new AasDebugLines(new BotDebugPolygons(), unused);
-  const library = new BotLibrary({ assets: unused, random: new LinuxNativeRandom(1), print: unused, commonPrint: unused,
+  const geometry: AasDebugGeometry = new AasDebugGeometry(lines, { polygonCreate: unused, polygonDelete: unused,
+    print: unused, debugBuild, memory: () => library.memory });
+  const library: BotLibrary = new BotLibrary({ assets: unused, random: new LinuxNativeRandom(1), print: unused, commonPrint: unused,
     openLog: unused, openWrite: unused, milliseconds: unused, permanentLine: unused,
-    movementDebug: lines.movement, clientCommand: unused });
+    movementDebug: lines.movement, clientCommand: unused,
+    ...(debugBuild ? { debugProfile: { kind: "source-debug", geometry, createLine: unused, showLine: unused } } : {}) });
   const ai = new GameAi(game.runtime, library, { getSnapshotEntity: unused, getConsoleMessage: unused,
     userCommand: unused, insertConsoleCommand: unused, checkBotSpawn: unused, loadMap: unused });
   const state = ai.context.states.acquire(0, game.runtime.memory);
@@ -66,6 +74,32 @@ test("BotPrintTeamGoal covers all thirteen source LTGs with product-specific cas
           ? "Sarge: I've got a regular goal\n" : `Sarge: I'm gonna ${action} for 3 secs\n`);
         expect(game.prints).toHaveLength(0);
       }
+    } finally { library.disposeResources(); game.runtime.shutdown(false); }
+  }
+});
+
+test("source DEBUG opt-in activates reached voice, text-command and decision diagnostics", () => {
+  for (const enabled of [false, true]) {
+    const { game, library, context, state } = fixture("baseq3", enabled);
+    try {
+      context.deathmatch.gametype = GameType.GT_CTF;
+      context.time = 10;
+      botVoiceChatReturnFlag(context, state, 0, 1);
+      expect(state.ltgType).toBe(BotLongTermGoal.RETURNFLAG);
+      expect(game.prints).toEqual(enabled ? ["Sarge: I'm gonna try to return the flag for 180 secs\n"] : []);
+      game.prints.length = 0;
+      game.configstrings.set(545, "\\n\\Friend\\t\\1");
+      game.cvars.set("sv_maxclients", "2");
+      const match: ChatMatch = { text: "Sarge", type: BotMessage.RETURNFLAG, subtype: 0,
+        variables: [{ kind: "present", offset: 0, length: 5 }, { kind: "absent" }, { kind: "absent" }, { kind: "absent" },
+          { kind: "absent" }, { kind: "absent" }, { kind: "absent" }, { kind: "absent" }] };
+      botMatchReturnFlag(context, state, match);
+      expect(game.prints).toEqual(enabled ? ["Sarge: I'm gonna try to return the flag for 180 secs\n"] : []);
+      game.prints.length = 0;
+      state.gs = library.goals.allocGoalState(0);
+      state.ms = library.moveStates.allocate();
+      expect(botGetItemLongTermGoal(context, state, 0, new BotGoalState())).toBe(false);
+      expect(game.prints).toEqual(enabled ? ["Sarge: no valid ltg (probably stuck)\n"] : []);
     } finally { library.disposeResources(); game.runtime.shutdown(false); }
   }
 });

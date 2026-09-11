@@ -16,7 +16,7 @@ export type BotLogOpenResult =
   | { readonly kind: "opened"; readonly stream: BotLogStream }
   | { readonly kind: "failed"; readonly error: Error };
 
-export interface BotLogFile { write(formatted: string): void }
+export interface BotLogFile { write(formatted: string): number | void }
 export interface BotLogGlobals { readonly time: number }
 export interface BotLogOptions {
   readonly variables: BotLibVars;
@@ -99,7 +99,8 @@ export class BotLog {
       stream: opened.stream,
       file: { write: formatted => {
         if (this.current !== entry) throw new Error("Cannot write a closed bot log borrow");
-        liveStream(entry).write(outputBytes(formatted));
+        const result = liveStream(entry).write(outputBytes(formatted));
+        return result.kind === "ok" ? formatted.length : -1;
       } },
     };
     this.current = entry;

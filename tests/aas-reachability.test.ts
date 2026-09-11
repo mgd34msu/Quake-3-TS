@@ -8,7 +8,7 @@ import { AasDebugLines } from "../src/botlib/aas-debug.ts";
 import { AasWorldState } from "../src/botlib/aas-world.ts";
 import { AasLinkHeap } from "../src/botlib/aas-links.ts";
 import { DEFAULT_AAS_MOVEMENT_SETTINGS } from "../src/botlib/aas-movement.ts";
-import { AasLinkedReachability, AasReachabilityGenerator } from "../src/botlib/aas-reachability.ts";
+import { AasLinkedReachability, AasReachabilityDebugState, AasReachabilityGenerator } from "../src/botlib/aas-reachability.ts";
 import type { AasReachabilityOptions } from "../src/botlib/aas-reachability.ts";
 import { aasBarrierJumpTravelTime, aasClosestEdgePoints, aasFaceArea, aasFaceCenter, aasFallDamageDistance, aasFallDelta, aasMaxJumpHeight,
   AasReachabilityGeometry } from "../src/botlib/aas-reachability-geometry.ts";
@@ -76,7 +76,8 @@ function loadedFixture(input: AasWorld, memory: BotMemory): AasWorld {
 }
 
 function fixture(height = 0, stored: readonly AasReachability[] = [], ladder = false,
-  options: { readonly memory?: BotMemory; readonly onPrint?: AasReachabilityOptions["print"] } = {}) {
+  options: { readonly memory?: BotMemory; readonly onPrint?: AasReachabilityOptions["print"]; readonly debugState?: AasReachabilityDebugState;
+    readonly ladderBottom?: boolean; readonly ladderSolid?: boolean } = {}) {
   const vertices = ladder
     ? [zero, vec3(0, -10, -20), vec3(0, -10, 0), vec3(0, 10, 0), vec3(0, 10, -20),
       vec3(0, -10, 0), vec3(0, -10, 20), vec3(0, 10, 20), vec3(0, 10, 0)]
@@ -92,7 +93,7 @@ function fixture(height = 0, stored: readonly AasReachability[] = [], ladder = f
     edgeIndexes: ladder ? [1, 2, 3, 4, 5, 6, 7, -2] : [1, 2, 3, 4, height === 0 ? -3 : 5, 6, 7, 8],
     faces: [{ plane: 0, flags: 0, edgeCount: 0, firstEdge: 0, frontArea: 0, backArea: 0 },
       { plane: ladder ? 0 : 2, flags: ladder ? 2 : 4, edgeCount: 4, firstEdge: 0, frontArea: 1, backArea: 0 },
-      { plane: ladder ? 0 : 4, flags: ladder ? 2 : 4, edgeCount: 4, firstEdge: 4, frontArea: 2, backArea: 0 }],
+      { plane: ladder ? options.ladderBottom === true ? 2 : 0 : 4, flags: ladder ? 2 : 4, edgeCount: 4, firstEdge: 4, frontArea: 2, backArea: 0 }],
     faceIndexes: [1, 2],
     areas: [{ areaNumber: 0, faceCount: 0, firstFace: 0, bounds: { min: zero, max: zero }, center: zero },
       { areaNumber: 1, faceCount: 1, firstFace: 0, bounds: { min: vec3(-10, -10, 0), max: vec3(0, 10, 80) }, center: vec3(-5, 0, 40) },
@@ -100,7 +101,7 @@ function fixture(height = 0, stored: readonly AasReachability[] = [], ladder = f
     areaSettings: Array.from({ length: 3 }, (_, area) => ({ contents: 0, flags: area === 0 ? 0 : ladder ? 2 : 1, presenceType: 2,
       cluster: 0, clusterAreaNumber: 0, reachableAreaCount: 0, firstReachableArea: 0 })),
     reachability: stored,
-    nodes: [{ plane: 0, children: [0, 0] }, { plane: 0, children: [-2, -1] }], portals: [], portalIndex: [], clusters: [], bboxes: [],
+    nodes: [{ plane: 0, children: [0, 0] }, { plane: 0, children: [options.ladderSolid === true ? 0 : -2, -1] }], portals: [], portalIndex: [], clusters: [], bboxes: [],
     pointArea: point => point.x > 0 ? 2 : 1,
     areaReachabilities: () => [],
     areaBounds: area => ({ min: vec3(area === 1 ? -10 : 0, -10, 0), max: vec3(area === 1 ? 0 : 10, 10, 80) }),
@@ -118,6 +119,7 @@ function fixture(height = 0, stored: readonly AasReachability[] = [], ladder = f
   const spatial = new AasSpatial(world, bspEntities, host, DEFAULT_AAS_MOVEMENT_SETTINGS, new BotBrushModelTypes(), links,
     debugLines.movement, () => variables.value("bot_visualizejumppads", "0"));
   const generator = new AasReachabilityGenerator({ world, spatial, bspEntities, variables,
+    debugState: options.debugState ?? new AasReachabilityDebugState(),
     print: (severity, text) => { messages.push(text); options.onPrint?.(severity, text); }, log: text => { messages.push(text); },
     permanentLine: (start, end, color) => { debug.permanentLine(start, end, color); }, milliseconds: () => 0 });
   return { world, variables, messages, generator, geometry: new AasReachabilityGeometry(generator) };
@@ -197,6 +199,67 @@ test("incremental generation publishes once in area/list order and requires the 
   expect(world.areaReachabilities(2).map(reach => [reach.area, reach.edge, reach.travelTime, reach.padding])).toEqual([[1, -3, 1, 0]]);
   expect(generator.allocatedReachabilityCount).toBe(0);
   expect(messages).toEqual(["0 weapon jump areas\n", "calculating reachability...\n", "\r  66.6%", "\r 100.0%", "\nplease wait while storing reachability...\n", "calculating clusters...\n"]);
+});
+
+test("reach DEBUG counts separate WALK producers and survive subsequent map generators", () => {
+  const debugState = new AasReachabilityDebugState({ debug: true, reachDebug: false });
+  const first = fixture(0, [], false, { debugState });
+  first.generator.initialize();
+  while (first.generator.continueInitialization(0)) {}
+  expect(first.messages.slice(-16)).toEqual([
+    "     0 reach swim\n", "     2 reach equal floor\n", "     0 reach step\n", "     0 reach barrier\n",
+    "     0 reach waterjump\n", "     0 reach walkoffledge\n", "     0 reach jump\n", "     0 reach ladder\n",
+    "     0 reach walk\n", "     0 reach teleport\n", "     0 reach funcbob\n", "     0 reach elevator\n",
+    "     0 reach grapple\n", "     0 reach rocketjump\n", "     0 reach jumppad\n", "calculating clusters...\n",
+  ]);
+  expect(first.messages).not.toContain("AAS_Reachability_Elevator\r\n");
+  const second = fixture(18, [], false, { debugState });
+  second.generator.initialize();
+  expect(second.geometry.stepBarrierWaterJumpWalkOffLedge(1, 2)).toBe(true);
+  expect(second.geometry.stepBarrierWaterJumpWalkOffLedge(2, 1)).toBe(true);
+  const counts: string[] = [];
+  debugState.printCounts((_severity, text) => { counts.push(text); });
+  expect(counts).toContain("     2 reach equal floor\n");
+  expect(counts).toContain("     1 reach step\n");
+  expect(counts).toContain("     1 reach walk\n");
+});
+
+test("reach DEBUG counts the first ladder publication when the second allocation fails", () => {
+  const debugState = new AasReachabilityDebugState({ debug: true, reachDebug: true });
+  const { generator, geometry } = fixture(0, [], true, { debugState });
+  generator.initialize();
+  for (let i = 0; i < 65535; i++) generator.allocate();
+  expect(geometry.ladder(1, 2)).toBe(false);
+  const counts: string[] = [];
+  debugState.printCounts((_severity, text) => { counts.push(text); });
+  expect(counts).toContain("     1 reach ladder\n");
+});
+
+test("REACH_DEBUG ladder reports excessive return-jump height only after destination eligibility", () => {
+  const debugState = new AasReachabilityDebugState({ debug: false, reachDebug: true });
+  const run = fixture(0, [], true, { debugState, ladderBottom: true });
+  run.generator.initialize();
+  expect(run.geometry.ladder(1, 2)).toBe(false);
+  expect(run.messages).toContain("jump too high between area 2 and 1\r\n");
+  expect(run.generator.allocatedReachabilityCount).toBe(0);
+  run.messages.length = 0;
+  const existing = run.generator.allocate();
+  if (existing === null) throw new Error("Expected fixture reachability");
+  existing.area = 2; existing.next = null; run.generator.heads[1] = existing;
+  expect(run.geometry.ladder(1, 2)).toBe(false);
+  expect(run.messages).toEqual([]);
+});
+
+test("REACH_DEBUG ladder logs a solid start and leaves the source post-return log unreachable", () => {
+  const debugState = new AasReachabilityDebugState({ debug: true, reachDebug: true });
+  const run = fixture(0, [], true, { debugState, ladderBottom: true, ladderSolid: true });
+  run.generator.initialize(); run.messages.length = 0;
+  expect(run.geometry.ladder(1, 2)).toBe(true);
+  expect(run.messages).toEqual(["trace from area 1 started in solid\r\n"]);
+  expect(run.generator.allocatedReachabilityCount).toBe(2);
+  debugState.printCounts((_severity, text) => { run.messages.push(text); });
+  expect(run.messages).toContain("     1 reach ladder\n");
+  expect(run.messages).toContain("     1 reach jump\n");
 });
 
 test("source existing-data path avoids allocation and forced replacement clears output padding", () => {

@@ -12,7 +12,7 @@ import { touchJumpPad } from "../shared/jump-pad.ts";
 import { movePlayer, updateViewAngles } from "../shared/movement.ts";
 import type { MovementTrace } from "../shared/movement.ts";
 import { ENTITYNUM_NONE, ENTITYNUM_WORLD, MoveFlags } from "../shared/player-state.ts";
-import type { SourcePlayerState, UserCommand } from "../shared/player-state.ts";
+import type { PredictableEventDebug, SourcePlayerState, UserCommand } from "../shared/player-state.ts";
 import { evaluateTrajectory } from "../shared/trajectory.ts";
 import { adjustPositionForMover } from "./entities.ts";
 import type { ClientEntity, ClientGameState } from "./state.ts";
@@ -66,6 +66,7 @@ export interface PredictionSettings {
   readonly showMiss: number;
 }
 export interface PredictionHost {
+  readonly eventDebug?: PredictableEventDebug;
   readonly commands: CommandSource;
   settings(): PredictionSettings;
   setPmoveMsec(value: number): void;
@@ -206,6 +207,7 @@ export class PredictionRuntime {
     const latest = this.requiredCommand(current);
     const selected = state.nextSnap !== null && !state.nextFrameTeleport && !state.thisFrameTeleport ? state.nextSnap : snapshot;
     state.predictedPlayerState = selected.playerState.copy();
+    state.predictedPlayerState.setEventDebug(this.host.eventDebug ?? null);
     state.physicsTime = selected.serverTime;
     const ps = state.predictedPlayerState;
     if (settings.pmoveMsec < 8) this.host.setPmoveMsec(8);

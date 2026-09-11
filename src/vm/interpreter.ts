@@ -32,8 +32,15 @@ class Operands {
   private readonly cells: (number | undefined)[] = new Array<number | undefined>(256);
   private depth = 0;
 
+  constructor(private readonly debug = false) {}
+
+  get count(): number { return this.depth; }
+
   reserve(): void {
-    if (this.depth === 255) throw new Error("QVM operand stack overflow");
+    if (this.depth === 255) {
+      if (this.debug) throw new CommonError("drop", "VM opStack overflow");
+      throw new Error("QVM operand stack overflow");
+    }
     this.depth++;
   }
 
@@ -41,7 +48,10 @@ class Operands {
 
   peek(): number {
     const word = this.cells[this.depth];
-    if (word === undefined) throw new Error("QVM reads an uninitialized operand");
+    if (word === undefined) {
+      if (this.debug) throw new CommonError("drop", "QVM reads an uninitialized operand");
+      throw new Error("QVM reads an uninitialized operand");
+    }
     return word;
   }
 
@@ -52,13 +62,19 @@ class Operands {
   pop(): number { const word = this.peek(); this.drop(); return word; }
 
   drop(): void {
-    if (this.depth === 0) throw new Error("QVM operand stack underflow");
+    if (this.depth === 0) {
+      if (this.debug) throw new CommonError("drop", "VM opStack underflow");
+      throw new Error("QVM operand stack underflow");
+    }
     this.depth--;
   }
 
   complementPrevious(): void {
     // This is the pinned interpreter's OP_BCOM, not the JIT's unary operation.
-    if (this.depth === 0) throw new Error("QVM operand stack underflow");
+    if (this.depth === 0) {
+      if (this.debug) throw new CommonError("drop", "VM opStack underflow");
+      throw new Error("QVM operand stack underflow");
+    }
     this.cells[this.depth - 1] = ~this.peek();
   }
 
@@ -98,6 +114,7 @@ export class QvmInterpreter {
   private active: Invocation | null = null;
   private rootActive = false;
   private breaks = 0;
+  private debug = false;
 
   constructor(image: QvmImage, private readonly systemCall: QvmSystemCall,
     profile: HunkAccountingProfile = { kind: "unaccounted" },
@@ -142,6 +159,7 @@ export class QvmInterpreter {
   }
 
   get breakCount(): number { return this.breaks; }
+  get debugEnabled(): boolean { return this.debug; }
   get codeLength(): number { this.live(); return this.code.length; }
   get instructionPointersLength(): number { this.live(); return this.instructionPointers.byteLength; }
 
@@ -197,7 +215,10 @@ export class QvmInterpreter {
 
   private stack(address: number): number {
     this.range(address, 0);
-    if (address % 4 !== 0) throw new Error("QVM program stack is misaligned");
+    if (address % 4 !== 0) {
+      if (this.debug) throw new CommonError("drop", "VM program stack misaligned");
+      throw new Error("QVM program stack is misaligned");
+    }
     return address;
   }
 
@@ -263,10 +284,16 @@ export class QvmInterpreter {
   private async execute(args: QvmArguments): Promise<number> {
     for (const word of args) signedWord(word);
     this.registration?.printCall(args[0]);
+    const profile = this.registration?.executionProfile() ?? { kind: "release" };
+    const debug = profile.kind === "debug";
+    const previousDebug = this.debug;
+    this.debug = debug;
+    const trace = profile.kind === "debug" ? profile.trace : 0;
+    const print = (text: string): void => { this.registration?.print(text); };
     const entryStack = this.programStack;
     let sp = this.stack(entryStack - 48);
     const previous = this.active;
-    const frame: Invocation = { operands: new Operands() };
+    const frame: Invocation = { operands: new Operands(debug) };
     const operands = frame.operands;
     this.active = frame;
     try {
@@ -276,19 +303,60 @@ export class QvmInterpreter {
       this.callLevel = 0;
       this.registration?.debug(0);
       let pc = 0;
+      let profileSymbol = debug ? this.symbols.valueToFunctionSymbol(0) : null;
+      const debugString = (): string => `${this.indent()}${operands.count}`;
       for (;;) {
+        if (debug) {
+          if (pc < 0 || pc >= this.code.length) throw new CommonError("drop", "VM pc out of range");
+          if (sp <= this.memory.length - 0x20000) throw new CommonError("drop", "VM stack overflow");
+          if ((sp & 3) !== 0) throw new CommonError("drop", "VM program stack misaligned");
+        }
         const opcode = this.codeWord(pc++);
+        if (profileSymbol !== null) {
+          if (trace > 1) {
+            const name = QvmOpcode[opcode];
+            // The source's sparse opnames table has no defined string outside the enum.
+            if (name === undefined) throw new CommonError("drop", "Bad VM instruction");
+            print(`${debugString()} ${name}\n`);
+          }
+          profileSymbol.profileCount = (profileSymbol.profileCount + 1) | 0;
+        }
         switch (opcode) {
-          case QvmOpcode.OP_UNDEF: case QvmOpcode.OP_IGNORE: break;
+          case QvmOpcode.OP_UNDEF: case QvmOpcode.OP_IGNORE:
+            if (debug) throw new CommonError("drop", "Bad VM instruction");
+            break;
           case QvmOpcode.OP_BREAK: this.breaks = (this.breaks + 1) | 0; break;
           case QvmOpcode.OP_CONST: operands.push(this.codeWord(pc)); pc += 4; break;
           case QvmOpcode.OP_LOCAL: operands.push((sp + this.codeWord(pc)) | 0); pc += 4; break;
           case QvmOpcode.OP_PUSH: operands.reserve(); break;
           case QvmOpcode.OP_POP: operands.drop(); break;
-          case QvmOpcode.OP_ENTER: sp = this.stack(sp - this.codeWord(pc)); pc += 4; break;
+          case QvmOpcode.OP_ENTER: {
+            if (debug) profileSymbol = this.symbols.valueToFunctionSymbol(pc);
+            const size = this.codeWord(pc);
+            sp = this.stack(sp - size);
+            pc += 4;
+            if (debug) {
+              this.writeWord(sp + 4, sp + size);
+              if (trace !== 0) {
+                print(`${debugString()}---> ${this.symbols.valueToSymbol(pc - 5)}\n`);
+                if (profile.kind === "debug" && profile.breakFunction !== 0 && pc - 5 === profile.breakFunction) {
+                  this.breaks = (this.breaks + 1) | 0;
+                }
+                this.callLevel++;
+              }
+            }
+            break;
+          }
           case QvmOpcode.OP_LEAVE: {
             sp = this.stack(sp + this.codeWord(pc));
             const target = this.readWord(sp);
+            if (debug) {
+              profileSymbol = this.symbols.valueToFunctionSymbol(target);
+              if (trace !== 0) {
+                this.callLevel--;
+                print(`${debugString()}<--- ${this.symbols.valueToSymbol(target)}\n`);
+              }
+            }
             if (target === -1) return operands.result();
             pc = target;
             break;
@@ -298,11 +366,18 @@ export class QvmInterpreter {
             const target = operands.pop();
             if (target >= 0) pc = this.targetPC(target);
             else {
+              if (trace !== 0) print(`${debugString()}---> systemcall(${-1 - target})\n`);
+              const savedCallLevel = this.callLevel;
               this.programStack = sp - 4;
+              const savedFrame = debug ? this.readWord(sp + 4) : null;
               this.writeWord(sp + 4, -1 - target);
               const result = this.trap(frame, sp);
-              operands.push(typeof result === "number" ? result : await result);
+              const value = typeof result === "number" ? result : await result;
+              if (savedFrame !== null) this.writeWord(sp + 4, savedFrame);
+              operands.push(value);
               pc = this.readWord(sp);
+              this.callLevel = savedCallLevel;
+              if (trace !== 0) print(`${debugString()}<--- ${this.symbols.valueToSymbol(pc)}\n`);
             }
             break;
           }
@@ -318,7 +393,10 @@ export class QvmInterpreter {
             operands.set(this.data.getUint16(address, true));
             break;
           }
-          case QvmOpcode.OP_LOAD4: operands.set(this.readWord(operands.peek() & this.dataMask)); break;
+          case QvmOpcode.OP_LOAD4:
+            if (debug && (operands.peek() & 3) !== 0) throw new CommonError("drop", "OP_LOAD4 misaligned");
+            operands.set(this.readWord(operands.peek() & this.dataMask));
+            break;
           case QvmOpcode.OP_STORE1: {
             const value = operands.pop();
             this.data.setUint8(operands.pop() & this.dataMask, value);
@@ -376,12 +454,15 @@ export class QvmInterpreter {
           }
           // The release interpreter has no default trap. A return into an
           // operand slot can therefore encounter a non-opcode integer as a nop.
-          default: break;
+          default:
+            if (debug) throw new CommonError("drop", "Bad VM instruction");
+            break;
         }
       }
     } finally {
       this.programStack = entryStack;
       this.active = previous;
+      if (previous !== null) this.debug = previousDebug;
     }
   }
 }

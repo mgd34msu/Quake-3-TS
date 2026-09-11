@@ -1,6 +1,7 @@
 // Source release32 allocation reservations from id Software's tr_bsp/tr_model/tr_image,
 // cm_load and cm_patch. Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 import type { HunkAllocation, HunkArena, HunkAsyncClearHost, HunkPreference } from "../core/hunk.ts";
+import { captureAllocationProvenance } from "../core/allocation-provenance.ts";
 import { SOURCE_BACKEND_RELEASE32, SourceBackendMemory, sourceBackendByteLength } from "./backend-memory.ts";
 import type { SceneSubmissionLimits } from "./scene-submission.ts";
 
@@ -93,7 +94,8 @@ export class SourceHunkAccounting {
   }
   reserve(source: string, resource: string, bytes: number, preference: HunkPreference): HunkAllocation {
     this.live();
-    const allocation = this.arena.allocate(bytes, preference);
+    const allocation = this.arena.allocate(bytes, preference,
+      this.arena.debugEnabled ? captureAllocationProvenance(source) : null);
     this.allocations.push(allocation);
     this.events.push({ action: "allocate", source, resource, bytes, reservedBytes: Math.ceil(bytes / 32) * 32, offset: allocation.byteOffset, preference });
     return allocation;

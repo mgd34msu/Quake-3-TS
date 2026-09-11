@@ -248,9 +248,14 @@ describe("snd_dma.c spatialization", () => {
       })).toBe(true);
       mixer.setListener(0, vec3(0, 0, 0), DEFAULT_AXIS);
       expect(values(mixer.mix(1))).toEqual([123, 123]);
-      expect(() => mixer.startSound(sound, {
-        ...options, origin: { kind: "entity", entity },
-      })).toThrow("entity must be an integer from 0 through 1023");
+      if (entity === 1024) {
+        expect(mixer.startSound(mono([512]), { ...options, origin: { kind: "entity", entity } })).toBe(true);
+        expect(() => mixer.setListener(0, vec3(0, 0, 0), DEFAULT_AXIS)).toThrow("entity must be an integer from 0 through 1023");
+      } else {
+        expect(() => mixer.startSound(sound, {
+          ...options, origin: { kind: "entity", entity },
+        })).toThrow("entity must be an integer from 0 through 1024");
+      }
     }
     const mixer = new AudioMixer(100, () => 0);
     for (const entity of [-2147483649, 2147483648, 0.5, NaN, Infinity]) {
@@ -390,13 +395,30 @@ describe("snd_dma.c spatialization", () => {
     expect(() => mixer.updateLoopingSound(mono([256]), {
       ...frameLoop(4), velocity: vec3(1, 0, 0),
     })).toThrow("Missing source sound position for entity 1024");
-    expect(() => mixer.startSound(mono([256]), {
+    expect(mixer.startSound(mono([256]), {
       entity: 1,
       channel: 1,
       origin: { kind: "entity", entity: 1024 },
       volume: 127,
-    })).toThrow("entity must be an integer from 0 through 1023");
+    })).toBe(true);
+    expect(() => mixer.setListener(0, vec3(0, 0, 0), DEFAULT_AXIS)).toThrow("entity must be an integer from 0 through 1023");
     expect(() => mixer.updateEntityPosition(1023, vec3(1, 2, 3))).not.toThrow();
+  });
+
+  test("listener MAX_GENTITIES plays local sounds until spatialization reaches an entity-position read", () => {
+    const mixer = new AudioMixer(100, () => 0);
+    mixer.setEffectsVolume(1);
+    mixer.setListener(1024, vec3(0, 0, 0), DEFAULT_AXIS);
+    expect(mixer.startLocalSound(mono([256, 512]), -1)).toBe(true);
+    mixer.setListener(1024, vec3(0, 0, 0), DEFAULT_AXIS);
+    expect(Array.from(mixer.channelVolumes()).map(channel => [channel.left, channel.right])).toEqual([[127, 127]]);
+    expect(values(mixer.mix(1))).toEqual([126, 126]);
+    expect(() => mixer.setListener(0, vec3(0, 0, 0), DEFAULT_AXIS)).toThrow("entity must be an integer from 0 through 1023");
+    mixer.clearSoundBuffer();
+    for (const listener of [-1, 1025]) {
+      mixer.setListener(listener, vec3(0, 0, 0), DEFAULT_AXIS);
+      expect(() => mixer.startLocalSound(mono([256]), -1)).toThrow("entity must be an integer from 0 through 1024");
+    }
   });
 
   test("falls silent after source attenuation reaches zero", () => {

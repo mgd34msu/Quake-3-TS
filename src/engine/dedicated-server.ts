@@ -60,6 +60,11 @@ export class DedicatedServerHost {
       createServer: services => {
         const createdUnix = unix;
         if (createdUnix === null) throw new Error("Dedicated platform must exist before server construction");
+        services.common.commands.registerAsync("net_restart", async () => {
+          services.assertCurrentOperation();
+          await createdUnix.restartNetwork(services.common.cvars);
+          services.assertCurrentOperation();
+        });
         createdUnix.bindConsoleCompletion(field => {
           field.complete(services.common.commands, services.common.cvars, text => { services.common.output.print(text); });
         });

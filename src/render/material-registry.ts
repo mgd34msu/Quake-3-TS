@@ -1,8 +1,6 @@
 // R_FindShader/R_GetShaderByHandle/R_RemapShader/R_ShaderList_f,
 // GeneratePermanentShader/SortNewShader, id Software tr_shader.c.
 // SPDX-License-Identifier: GPL-2.0-or-later
-import type { BspMap } from "../assets/bsp.ts";
-import type { RendererBspMap } from "./bsp-resource.ts";
 import { sameShaderName, shaderNameHash, stripShaderExtension } from "./material.ts";
 import type { RegisteredSky, ShaderDefinition } from "./material.ts";
 import type { RendererImage } from "./image-resource.ts";
@@ -22,7 +20,7 @@ function lookupName(name: string): string {
 }
 
 export type MaterialLighting = { readonly kind: "none" | "vertex" | "white" | "picture" }
-  | { readonly kind: "lightmap"; readonly owner: BspMap | RendererBspMap; readonly index: number; readonly image: RendererImage };
+  | { readonly kind: "lightmap"; readonly owner: object; readonly index: number; readonly image: RendererImage };
 
 export interface MaterialContent {
   readonly definition: ShaderDefinition | null;

@@ -10,7 +10,7 @@ import { AasDebugLines } from "../src/botlib/aas-debug.ts";
 import { AasSpatial, BotBrushModelTypes } from "../src/botlib/spatial.ts";
 import type { AasSpatialHost } from "../src/botlib/spatial.ts";
 import { DEFAULT_AAS_MOVEMENT_SETTINGS } from "../src/botlib/aas-movement.ts";
-import { AasLinkedReachability } from "../src/botlib/aas-reachability.ts";
+import { AasLinkedReachability, AasReachabilityDebugState } from "../src/botlib/aas-reachability.ts";
 import type { AasReachabilityContext } from "../src/botlib/aas-reachability.ts";
 import { AasReachabilitySpecial } from "../src/botlib/aas-reachability-special.ts";
 import { TravelType } from "../src/botlib/routing.ts";
@@ -80,6 +80,7 @@ function fixtureWorld(rightFloor: number, wall: boolean, padCeiling: number | un
   return new AasWorldState(parsed);
 }
 interface FixtureOptions {
+  readonly debugState?: AasReachabilityDebugState;
   readonly entities: string;
   readonly models: readonly { readonly bounds: Bounds; readonly origin: Vec3 }[];
   readonly rightFloor?: number;
@@ -118,6 +119,7 @@ function fixture(options: FixtureOptions) {
     debugLines.movement, () => variables.value("bot_visualizejumppads", "0"));
   const active = new Set<AasLinkedReachability>(), heads: (AasLinkedReachability | null)[] = world.areas.map(() => null);
   const context: AasReachabilityContext = {
+    debugState: options.debugState ?? new AasReachabilityDebugState(),
     world, spatial, settings, variables, bspEntities, heads, print,
     log: text => { logs.push(text); },
     permanentLine: (start, end, color) => { lines.push({ start, end, color }); polygons.permanentLine(start, end, color); },
@@ -130,6 +132,35 @@ function fixture(options: FixtureOptions) {
 const triggerBounds: Bounds = { min: vec3(-8, -8, 0), max: vec3(8, 8, 20) };
 
 describe("compiled special reachability source paths", () => {
+  test("REACH_DEBUG elevator messages use source ordering independently from DEBUG counts", () => {
+    const options: FixtureOptions = { entities: '{ "classname" "func_plat" "model" "*1" "origin" "-32 0 0" }',
+      models: [{ bounds: { min: vec3(-16, -16, 0), max: vec3(16, 16, 128) }, origin: ZERO }], rightFloor: 128 };
+    const plain = fixture(options); plain.special.elevator(); expect(plain.logs).toEqual([]);
+    const debugState = new AasReachabilityDebugState({ reachDebug: true, debug: false });
+    const run = fixture({ ...options, debugState }); run.special.elevator();
+    expect(run.logs).toEqual(["AAS_Reachability_Elevator\r\n", "found func plat\r\n", "elevator reach from 1 to 2\r\n"]);
+    expect(run.context.heads.flatMap(reaches).map(link => [link.area, link.start, link.end, link.travelTime]))
+      .toEqual(plain.context.heads.flatMap(reaches).map(link => [link.area, link.start, link.end, link.travelTime]));
+    debugState.printCounts(run.context.print); expect(run.messages).toEqual([]);
+    const invalid = fixture({ entities: '{ "classname" "func_plat" }', models: [], debugState });
+    invalid.special.elevator();
+    expect(invalid.logs).toEqual(["AAS_Reachability_Elevator\r\n", "found func plat\r\n"]);
+    expect(invalid.messages).toEqual([{ severity: 3, text: "func_plat without model\n" }]);
+  });
+
+  test("reach DEBUG excludes temporary bobbing records and counts published records on allocation failure", () => {
+    for (const capacity of [128, 3]) {
+      const debugState = new AasReachabilityDebugState({ reachDebug: false, debug: true });
+      const run = fixture({ entities: '{ "classname" "func_bobbing" "model" "*1" "height" "64" "spawnflags" "1" }',
+        models: [{ bounds: { min: vec3(-16, -16, -28), max: vec3(16, 16, -20) }, origin: ZERO }], capacity, debugState });
+      if (capacity === 3) expect(() => run.special.funcBobbing()).toThrow("failed reachability allocation");
+      else run.special.funcBobbing();
+      debugState.printCounts(run.context.print);
+      expect(run.messages).toContainEqual({ severity: 1, text: capacity === 3 ? "     1 reach funcbob\n" : "     2 reach funcbob\n" });
+      expect(run.context.heads.flatMap(reaches)).toHaveLength(capacity === 3 ? 1 : 2);
+    }
+  });
+
   test("teleport relay lookup, team flags, prepend order and allocation failure retain source writes", () => {
     const options: FixtureOptions = { entities: `
       { "classname" "trigger_multiple" "model" "*1" "target" "relay" "bot_notteam" "1" }

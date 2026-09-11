@@ -121,7 +121,7 @@ describe("common console ownership and native initialization prerequisites", () 
     expect(allocation.bytes.length).toBe(32);
   });
 
-  test("common vmprofile follows real nested GAME and UI calls through acquired symbols", async () => {
+  for (const debug of [false, true]) test(`common vmprofile follows real nested GAME and UI calls through acquired symbols with debug ${debug}`, async () => {
     const code = new BinaryWriter(32);
     code.u8(QvmOpcode.OP_ENTER); code.i32(16);
     code.u8(QvmOpcode.OP_LOCAL); code.i32(24);
@@ -138,7 +138,7 @@ describe("common console ownership and native initialization prerequisites", () 
       entries.push({ name: new TextEncoder().encode(`vm/${role}.qvm`), data: image.finish(), method: 0, utf8: false });
       entries.push({ name: new TextEncoder().encode(`vm/${role}.map`), data: new TextEncoder().encode(`0 0 ${name}\n`), method: 0, utf8: false });
     }
-    const f = await fixture("+set developer 1", { kind: "dedicated" }, entries);
+    const f = await fixture(`+set developer 1 +set com_vmDebug ${debug ? 1 : 0}`, { kind: "dedicated" }, entries);
     f.common.registerRuntimeCvars("vm-profile", async () => undefined); f.common.initVm();
     const files = f.common.files.current, registry = f.common.vm;
     const loading = { print: (text: string): void => { f.common.output.print(text); },
@@ -177,8 +177,13 @@ describe("common console ownership and native initialization prerequisites", () 
     expect(profile.match(/gameEntry\n/g)?.length).toBe(1);
     expect(profile.match(/uiEntry\n/g)?.length).toBe(2);
     expect(profile.indexOf("gameEntry")).toBeLessThan(profile.indexOf("uiEntry"));
-    expect(profile.match(/percentages are undefined/g)?.length).toBe(3);
-    expect(profile).not.toContain("%");
+    if (debug) {
+      expect(profile).toBe("100%        13 gameEntry\n           13 total\n"
+        + "100%        27 uiEntry\n           27 total\n100%         1 uiEntry\n            1 total\n");
+    } else {
+      expect(profile.match(/percentages are undefined/g)?.length).toBe(3);
+      expect(profile).not.toContain("%");
+    }
     await ui.shutdown(); ui.retire();
     f.printed.length = 0;
     await execute(f.common, "vmprofile\n");
@@ -305,7 +310,7 @@ describe("common console ownership and native initialization prerequisites", () 
     }
     f.common.cvars.set("fs_basepath", join(f.root, "other-data"), true);
     f.common.validateGameDirectory();
-    expect(f.common.roots.dataPath).toBe(join(f.root, "other-data"));
+    expect(f.common.roots.dataPath.sourceText).toBe(join(f.root, "other-data"));
     expect(f.common.files.current.readFileLength("default.cfg")).toBeGreaterThan(0);
     f.common.cvars.set("fs_basepath", f.dataPath, true);
     f.common.validateGameDirectory();

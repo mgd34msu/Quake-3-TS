@@ -1,6 +1,6 @@
 /*
  * Output lifetime and S_ClearSoundBuffer from id Software's code/client/snd_dma.c.
- * SDL2 queued S16 audio replaces the platform DMA buffer.
+ * SDL2 queued U8/S16 audio replaces the platform DMA buffer.
  * Copyright (C) 1999-2005 Id Software, Inc.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -9,7 +9,8 @@ import type { SoundPaintRange } from "../audio/mixer.ts";
 import { SdlAudioDevice } from "../platform/audio.ts";
 import type { SdlAudioOptions } from "../platform/audio.ts";
 
-export type SoundOutputOptions = Pick<SdlAudioOptions, "sampleRate" | "bufferFrames">;
+export type SoundOutputOptions = Pick<SdlAudioOptions, "sampleRate" | "bufferFrames" | "sampleBits" | "deviceName">
+  & { readonly channels?: 1 | 2 };
 
 interface StartedOutput {
   readonly kind: "started";
@@ -18,7 +19,7 @@ interface StartedOutput {
   paused: boolean;
   delivered: number;
   clockOffset: number;
-  pending: Int16Array;
+  pending: Int16Array | Uint8Array;
 }
 
 type OutputState = { readonly kind: "idle" } | StartedOutput | { readonly kind: "closed" };
@@ -31,16 +32,16 @@ export class SoundOutput {
     return this.state.kind === "started" ? this.state.mixer : null;
   }
 
-  /** Opens paused stereo output. Repeated starts retain the current pair and ignore new options. */
+  /** Opens paused output. Repeated starts retain the current pair and ignore new options. */
   start(options: SoundOutputOptions, milliseconds: () => number): AudioMixer {
     if (this.state.kind === "closed") throw new Error("Sound output is closed");
     if (this.state.kind === "started") return this.state.mixer;
-    const device = SdlAudioDevice.open({ ...options, channels: 2 });
+    const device = SdlAudioDevice.open({ ...options, channels: options.channels ?? 2 });
     try {
-      const mixer = new AudioMixer(device.sampleRate, milliseconds);
+      const mixer = new AudioMixer(device.sampleRate, milliseconds, 96, device.channels);
       mixer.clearSoundBuffer();
       device.clear();
-      this.state = { kind: "started", mixer, device, paused: true, delivered: 0, clockOffset: 0, pending: new Int16Array(0) };
+      this.state = { kind: "started", mixer, device, paused: true, delivered: 0, clockOffset: 0, pending: this.silence(device, 0) };
       return mixer;
     } catch (error) {
       device.close();
@@ -56,7 +57,7 @@ export class SoundOutput {
     this.withPaused(state, () => {
       this.synchronize(state);
       state.device.clear();
-      state.pending = new Int16Array(0);
+      state.pending = this.silence(state.device, 0);
       state.clockOffset = state.device.playbackFrames - state.delivered;
     });
   }
@@ -67,6 +68,9 @@ export class SoundOutput {
 
   get paused(): boolean { return this.started().paused; }
   get maxQueuedFrames(): number { return this.started().device.maxQueuedFrames; }
+  get channels(): 1 | 2 { return this.started().device.channels; }
+  get sampleBits(): 8 | 16 { return this.started().device.sampleBits; }
+  get deviceName(): string | null { return this.started().device.deviceName; }
 
   /** Queued PCM advances by actual delivery; an empty queue advances through logical silence. */
   get deliveryTime(): number {
@@ -92,7 +96,7 @@ export class SoundOutput {
   }
 
   /** Defensive copy of the still-native-queued PCM; delivered samples are excluded. */
-  get pendingOutput(): { readonly startFrame: number; readonly samples: Int16Array } {
+  get pendingOutput(): { readonly startFrame: number; readonly samples: Int16Array | Uint8Array } {
     const state = this.started();
     this.synchronize(state);
     return { startFrame: state.delivered, samples: state.pending.slice() };
@@ -109,7 +113,7 @@ export class SoundOutput {
       throw new Error("SDL audio queue exceeds the two-second limit");
     }
     this.synchronize(state);
-    const startFrame = state.delivered + state.pending.length / 2;
+    const startFrame = state.delivered + state.pending.length / device.channels;
     this.repaint({ startFrame, endFrame: startFrame + frames });
   }
 
@@ -124,13 +128,27 @@ export class SoundOutput {
       this.synchronize(state);
       const begin = Math.max(range.startFrame, state.delivered);
       if (range.endFrame <= begin) return;
-      const end = Math.max(range.endFrame, state.delivered + state.pending.length / 2);
+      const channels = state.device.channels;
+      const end = Math.max(range.endFrame, state.delivered + state.pending.length / channels);
       // A previously empty prefix represents actual queued silence before the source prestep.
-      const replacement = new Int16Array((end - state.delivered) * 2);
+      const replacement = this.silence(state.device, end - state.delivered);
       replacement.set(state.pending);
-      replacement.set(samples.subarray((begin - range.startFrame) * 2), (begin - state.delivered) * 2);
+      // S_TransferPaintBuffer selects the left paint cell for mono, then clips
+      // before its unsigned eight-bit conversion. mix() already clips to S16.
+      if (state.device.sampleBits === 16 && channels === 2) {
+        replacement.set(samples.subarray((begin - range.startFrame) * 2), (begin - state.delivered) * 2);
+      } else {
+        for (let frame = begin; frame < range.endFrame; frame++) {
+          for (let channel = 0; channel < channels; channel++) {
+            const sample = samples[(frame - range.startFrame) * 2 + channel];
+            if (sample === undefined) throw new RangeError("Sound paint output is truncated");
+            replacement[(frame - state.delivered) * channels + channel] = state.device.sampleBits === 16
+              ? sample : (sample >> 8) + 128;
+          }
+        }
+      }
       state.device.clear();
-      state.pending = new Int16Array(0);
+      state.pending = this.silence(state.device, 0);
       // On failure the native queue really is empty. Never resurrect discarded ownership.
       state.device.queue(replacement);
       state.pending = replacement;
@@ -158,10 +176,10 @@ export class SoundOutput {
   }
 
   private synchronize(state: StartedOutput): void {
-    const consumed = state.pending.length / 2 - state.device.queuedFrames;
+    const consumed = state.pending.length / state.device.channels - state.device.queuedFrames;
     if (consumed < 0) throw new Error("SDL queue contains output not owned by SoundOutput");
     state.delivered += consumed;
-    state.pending = state.pending.subarray(consumed * 2);
+    state.pending = state.pending.subarray(consumed * state.device.channels);
     if (state.pending.length === 0) {
       const playbackFrames = state.device.playbackFrames;
       state.delivered = Math.max(state.delivered, playbackFrames - state.clockOffset);
@@ -169,6 +187,11 @@ export class SoundOutput {
       // final queue head without waiting for the nominal clock to catch up.
       state.clockOffset = playbackFrames - state.delivered;
     }
+  }
+
+  private silence(device: SdlAudioDevice, frames: number): Int16Array | Uint8Array {
+    const samples = frames * device.channels;
+    return device.sampleBits === 16 ? new Int16Array(samples) : new Uint8Array(samples).fill(128);
   }
 
   private withPaused(state: StartedOutput, operation: () => void): void {

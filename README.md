@@ -12,6 +12,7 @@ Playable client and dedicated-server paths are integrated for both games. Source
 - Bun 1.3.14 or later for source runs and builds. Bun 1.3.14 is the verified version.
 - SDL2, with `libSDL2-2.0.so.0` available to the loader, for the graphical client.
 - A system OpenGL driver, normally available through `libGL.so.1`, for `--renderer gl`.
+- Optional system FreeType (`libfreetype.so.6`) for generating fonts without prebuilt DAT files.
 - Your own installed Quake III Arena retail data. Team Arena also requires its expansion data.
 
 Select the installation root that contains the product directories, not `baseq3` itself:

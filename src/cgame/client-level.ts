@@ -59,6 +59,7 @@ export interface ClientLevelClock {
   frameNumber(): number;
 }
 export interface ClientLevelOptions {
+  readonly sourceDebug?: boolean;
   readonly session: EngineClientSession;
   readonly assets: SoundAssetReader;
   readonly resources: RendererResources;
@@ -336,6 +337,8 @@ export class ClientLevel {
     // Registered scalar media projections are captured only after their source registration phase.
     const pool = new LocalEntityPool(session.product);
     const prediction: PredictionRuntime = new PredictionRuntime(state, collision, { commands: session.commands,
+      ...(options.sourceDebug ? { eventDebug: { kind: "source-debug", module: "cgame",
+        showEvents: () => session.cvars.get("showevents")?.value ?? "", print } } : {}),
       settings: () => ({ gameType: staticState.gameType, dmFlags: staticState.dmFlags, demoPlayback: context.demoPlayback,
         noPredict: enabled("cg_nopredict"), synchronousClients: enabled("cg_synchronousClients"), predictItems: enabled("cg_predictItems"),
         pmoveFixed: enabled("pmove_fixed"), pmoveMsec: integer("pmove_msec"), errorDecayInteger: integer("cg_errorDecay"),

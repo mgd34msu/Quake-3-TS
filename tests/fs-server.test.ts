@@ -268,14 +268,23 @@ if (process.env["QUAKE_FS_SERVER_SOUND_CHILD"] === "1") {
     expect(descriptors(f.root)).toHaveLength(2); f.files.close(); expect(descriptors(f.root)).toEqual([]);
   });
 
-  test("security boundaries reject credential and traversal reads and ignore symlink mod directories", async () => {
+  test("server key reads preserve traversal rejection and ignore symlink mod directories", async () => {
     const f = await fixture(true); write(join(f.home, "mod", "q3key"), "fixture credential");
+    write(join(f.home, "mod", "Quake3CDKey"), "fixture alternate credential");
     mod(f.cd, "actual", "real"); symlinkSync(join(f.cd, "actual"), join(f.home, "linked"));
-    expect(f.files.server.openRead("mod/q3key")).toBeNull(); expect(f.files.server.openRead("mod/Quake3CDKey")).toBeNull();
+    expect(read(f.files, "mod/q3key")).toBe("fixture credential");
+    expect(read(f.files, "mod/Quake3CDKey")).toBe("fixture alternate credential");
     expect(() => f.files.server.openRead("../outside")).toThrow("traversal");
     const bytes = new Uint8Array(128), count = f.files.current.getFileList("$modlist", "", bytes);
     expect(pairs(bytes, count)).toEqual([["actual", "real"]]);
     expect(descriptors(f.root)).toEqual([]);
+    const { common, root } = await commonFixture();
+    common.registerRuntimeCvars("synthetic-server-key", async () => undefined);
+    common.markInitialized();
+    write(join(root, "baseq3", "q3key"), "fixture initialized credential");
+    expect(read(common.files, "baseq3/q3key")).toBe("fixture initialized credential");
+    expect(common.files.current.openRead("q3key")).toBeUndefined();
+    expect(descriptors(root)).toEqual([]);
   });
 
   test("sound and diagnostic reentry cannot publish descriptors into closed or retired mounts", async () => {
@@ -290,10 +299,14 @@ if (process.env["QUAKE_FS_SERVER_SOUND_CHILD"] === "1") {
       files = f.files; f.cvars.set("fs_debug", "1"); write(join(f.home, "read.txt"), "real resource");
       const clear = f.sound.clearSoundBuffer.bind(f.sound);
       if (point === "sound") f.sound.clearSoundBuffer = () => { clear(); f.files.close(); };
-      expect(() => f.files.server.openRead("read.txt")).toThrow("no active mounts");
-      if (pending !== null) await pending;
+      try {
+        expect(() => f.files.server.openRead("read.txt")).toThrow(point === "remount"
+          ? "Filesystem mounts changed during server file operation" : "no active mounts");
+      } finally {
+        try { if (pending !== null) await pending; }
+        finally { f.sound.clearSoundBuffer = clear; }
+      }
       expect(descriptors(f.root)).toEqual([]);
-      f.sound.clearSoundBuffer = clear;
     }
   });
 

@@ -113,6 +113,7 @@ export class AasSpatial {
     private readonly linkHeap: AasLinkHeap,
     debug: AasMovementDebug,
     private readonly visualizeJumpPads: () => number,
+    private readonly sampleDebug = false,
   ) {
     this.movement = new AasMovement(this, settings, debug);
     this.linkedEntities = linkHeap.createAreaHeads(world.areas.length);
@@ -139,12 +140,12 @@ export class AasSpatial {
   writeTraceAreas(start: Vec3, end: Vec3, maximumAreas: number,
     publish: (crossing: AasAreaCrossing, index: number) => undefined): number {
     return AasSpatial.writeWorldTraceAreas(this.world, start, end, maximumAreas, publish,
-      text => { this.host.print(text, 3); });
+      text => { this.host.print(text, 3); }, this.sampleDebug);
   }
 
   /** Sampling needs only the parsed tree, including the source data-loaded phase. */
   static writeWorldTraceAreas(world: AasWorld, start: Vec3, end: Vec3, maximumAreas: number,
-    publish: (crossing: AasAreaCrossing, index: number) => undefined, print: (text: string) => void): number {
+    publish: (crossing: AasAreaCrossing, index: number) => undefined, print: (text: string) => void, sampleDebug = false): number {
     const first = vec3(start.x, start.y, start.z), last = vec3(end.x, end.y, end.z);
     finiteVector(first); finiteVector(last);
     const stack: TracePiece[] = [{ start: first, end: last, node: 1, plane: 0 }];
@@ -159,9 +160,17 @@ export class AasSpatial {
       const piece = stack.pop();
       if (piece === undefined) break;
       if (piece.node < 0) {
+        if (sampleDebug && -piece.node > world.areaSettings.length) {
+          print(`AAS_TraceAreas: -nodenum = ${-piece.node} out of range\n`);
+          return count;
+        }
         publish({ area: -piece.node, point: piece.start }, count++);
         if (count >= maximumAreas) break;
       } else if (piece.node > 0) {
+        if (sampleDebug && piece.node > world.nodes.length) {
+          print("AAS_TraceAreas: nodenum out of range\n");
+          return count;
+        }
         const node = at(world.nodes, piece.node), plane = at(world.planes, node.plane);
         const front = f(dot3(piece.start, plane.normal) - plane.distance), back = f(dot3(piece.end, plane.normal) - plane.distance);
         if (front > 0 && back > 0) { if (!push({ ...piece, node: node.children[0] })) return count; }
@@ -191,7 +200,7 @@ export class AasSpatial {
       (area, segmentStart, segmentEnd) => this.traceAreaEntityCollision(area, segmentStart, segmentEnd,
         this.presenceBounds(presence), passEntity,
         (entity, entityStart, entityEnd, bounds, mask) => this.host.entityTrace(entity, entityStart, entityEnd, bounds, mask)),
-      text => { this.host.print(text, 3); });
+      text => { this.host.print(text, 3); }, this.sampleDebug);
   }
 
   traceAreaEntityCollision(area: number, start: Vec3, end: Vec3, bounds: Bounds, passEntity: number,
@@ -207,7 +216,7 @@ export class AasSpatial {
 
   static traceWorldClientBBox(world: AasWorld, start: Vec3, end: Vec3, presence: number, passEntity: number,
     traceEntities: (area: number, start: Vec3, end: Vec3) => AasBspTrace | null,
-    print: (message: string) => void): AasTrace {
+    print: (message: string) => void, sampleDebug = false): AasTrace {
     finiteVector(start); finiteVector(end);
     const stack: TracePiece[] = [{ start: vec3(start.x, start.y, start.z), end: vec3(end.x, end.y, end.z), node: 1, plane: 0 }];
     let lastArea = 0;
@@ -223,6 +232,10 @@ export class AasSpatial {
       const piece = stack.pop();
       if (piece === undefined) break;
       if (piece.node <= 0) {
+        if (sampleDebug && -piece.node > world.areaSettings.length) {
+          print("AAS_TraceBoundingBox: -nodenum out of range\n");
+          return overflow();
+        }
         if (piece.node === 0 || (at(world.areaSettings, -piece.node).presenceType & presence) === 0) {
           const startSolid = same(piece.start, start), direction = startSolid ? zero : normalize3(sub3(end, start));
           const fraction = startSolid ? 0 : f(length3(sub3(piece.start, start)) / length3(sub3(end, start)));
@@ -240,6 +253,10 @@ export class AasSpatial {
         }
         lastArea = -piece.node;
         continue;
+      }
+      if (sampleDebug && piece.node > world.nodes.length) {
+        print("AAS_TraceBoundingBox: nodenum out of range\n");
+        return overflow();
       }
       const node = at(world.nodes, piece.node), plane = at(world.planes, node.plane);
       let front = f(dot3(piece.start, plane.normal) - plane.distance);
@@ -434,11 +451,15 @@ export class AasSpatial {
   /** AAS_PointInsideFace from be_aas_sample.c; this owner always contains a loaded world. */
   pointInsideFace(faceNumber: number, point: Vec3, epsilon: number): boolean {
     const face = at(this.world.faces, faceNumber), plane = at(this.world.planes, face.plane);
-    return aasInsideFace(this.world, face, plane.normal, point, epsilon);
+    return aasInsideFace(this.world, face, plane.normal, point, epsilon, this.sampleDebug ? text => this.host.print(text, 1) : null);
   }
 
-  areaGroundFace(area: number, point: Vec3): AasFace | null { return aasAreaGroundFace(this.world, area, point); }
-  traceEndFace(trace: AasTrace): AasFace | null { return aasTraceEndFace(this.world, trace); }
+  areaGroundFace(area: number, point: Vec3): AasFace | null {
+    return aasAreaGroundFace(this.world, area, point, this.sampleDebug ? text => this.host.print(text, 1) : null);
+  }
+  traceEndFace(trace: AasTrace): AasFace | null {
+    return aasTraceEndFace(this.world, trace, this.sampleDebug ? text => this.host.print(text, 1) : null);
+  }
   facePlane(face: number): AasPlane { return aasFacePlane(this.world, face); }
 
   /** AAS_GetJumpPadInfo is shared by goal sampling and reachability generation. */

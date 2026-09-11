@@ -218,6 +218,7 @@ export class AasReachabilityGeometry {
         reach.travelType = TravelType.SWIM; reach.travelTime = 1;
         if (aasAreaVolume(world, to) < 800) reach.travelTime += 200;
         this.link(from, reach);
+        this.context.debugState.count("swim");
         return true;
       }
     }
@@ -257,6 +258,7 @@ export class AasReachabilityGeometry {
     reach.travelType = TravelType.WALK; reach.travelTime = 1;
     this.link(from, reach);
     if (!this.crouch(from) && this.crouch(to)) reach.travelTime = f(reach.travelTime + settings.startCrouchTime);
+    this.context.debugState.count("equal floor");
     return true;
   }
 
@@ -341,6 +343,7 @@ export class AasReachabilityGeometry {
       reach.travelType = TravelType.WALK; reach.travelTime = 0;
       if (!this.crouch(from) && this.crouch(to)) reach.travelTime = f(reach.travelTime + settings.startCrouchTime);
       this.link(from, reach);
+      this.context.debugState.count("step");
       return true;
     }
     if (water !== null) {
@@ -352,6 +355,7 @@ export class AasReachabilityGeometry {
         reach.area = to; reach.face = 0; reach.edge = water.edge; reach.start = water.start;
         reach.end = ma(water.end, 15, water.normal); reach.travelType = TravelType.WATERJUMP; reach.travelTime = settings.waterJumpTime;
         this.link(from, reach);
+        this.context.debugState.count("waterjump");
         return true;
       }
     }
@@ -363,6 +367,7 @@ export class AasReachabilityGeometry {
       reach.start = maDouble(ground.start, 0.1, ground.normal); reach.end = ma(ground.end, 5, ground.normal);
       reach.travelType = TravelType.BARRIERJUMP; reach.travelTime = settings.barrierJumpTime;
       this.link(from, reach);
+      this.context.debugState.count("barrier");
       return true;
     }
     if (ground === null || ground.distance >= 0) return false;
@@ -373,6 +378,7 @@ export class AasReachabilityGeometry {
       reach.start = maDouble(ground.start, 0.1, ground.normal); reach.end = ma(ground.end, 5, ground.normal);
       reach.travelType = TravelType.WALK; reach.travelTime = 1;
       this.link(from, reach);
+      this.context.debugState.count("walk");
       return true;
     }
     if (settings.maxFallHeight !== 0 && !(Math.abs(ground.distance) < settings.maxFallHeight)) return false;
@@ -390,6 +396,7 @@ export class AasReachabilityGeometry {
       if (aasFallDelta(settings, ground.distance) > settings.fallDelta10) reach.travelTime = f(reach.travelTime + settings.fallDamage10Time);
     }
     this.link(from, reach);
+    this.context.debugState.count("walkoffledge");
     return true;
   }
 
@@ -471,6 +478,7 @@ export class AasReachabilityGeometry {
       if (found) break;
     }
     if (!found) return false;
+    if (this.context.debugState.profile.reachDebug) this.context.log(`jump reachability between ${from} and ${to}\r\n`);
     const reach = this.context.allocate();
     if (reach === null) return false;
     reach.area = to; reach.face = 0; reach.edge = 0; reach.start = bestStart; reach.end = bestEnd; reach.travelType = travelType;
@@ -483,6 +491,7 @@ export class AasReachabilityGeometry {
       else if (aasFallDelta(settings, f(bestStart.z - bestEnd.z)) > settings.fallDelta10) reach.travelTime = f(reach.travelTime + settings.fallDamage10Time);
     }
     this.link(from, reach);
+    this.context.debugState.count((travelType & TravelType.MASK) === TravelType.JUMP ? "jump" : "walkoffledge");
     // The source returns false even after publishing a jump reachability.
     return false;
   }
@@ -529,11 +538,13 @@ export class AasReachabilityGeometry {
       first.area = to; first.face = best.number1; first.edge = Math.abs(best.edge); first.start = point1;
       first.end = ma(point2, -3, plane1.normal); first.travelType = TravelType.LADDER; first.travelTime = 10;
       this.link(from, first);
+      this.context.debugState.count("ladder");
       const second = this.context.allocate();
       if (second === null) return false;
       second.area = from; second.face = best.number2; second.edge = Math.abs(best.edge); second.start = point2;
       second.end = ma(point1, -3, plane1.normal); second.travelType = TravelType.LADDER; second.travelTime = 10;
       this.link(to, second);
+      this.context.debugState.count("ladder");
       return true;
     }
     if (vertical1 && (best.face2.flags & 4) !== 0) {
@@ -542,11 +553,13 @@ export class AasReachabilityGeometry {
       first.area = to; first.face = best.number1; first.edge = Math.abs(best.edge); first.start = point1;
       first.end = ma(z(point2, point2.z + 16), -15, plane1.normal); first.travelType = TravelType.LADDER; first.travelTime = 10;
       this.link(from, first);
+      this.context.debugState.count("ladder");
       const second = this.context.allocate();
       if (second === null) return false;
       second.area = from; second.face = best.number2; second.edge = Math.abs(best.edge); second.start = point2;
       second.end = point1; second.travelType = TravelType.WALKOFFLEDGE; second.travelTime = 10;
       this.link(to, second);
+      this.context.debugState.count("walkoffledge");
       return true;
     }
     if (!vertical1) return false;
@@ -559,25 +572,32 @@ export class AasReachabilityGeometry {
     plane1 = aasAt(world.planes, best.face1.plane);
     if (lowest === null) throw new Error("AAS_Reachability_Ladder reads an uninitialized lowest point");
     const offset = ma(lowest.point, 5, plane1.normal), start = z(offset, offset.z + 5), end = z(offset, offset.z - 100);
-    const trace = spatial.traceClientBBox(start, end, 2, -1), traceEnd = z(trace.end, trace.end.z + 1), destination = world.pointArea(traceEnd);
+    const trace = spatial.traceClientBBox(start, end, 2, -1);
+    if (this.context.debugState.profile.reachDebug && trace.startSolid) this.context.log(`trace from area ${from} started in solid\r\n`);
+    const traceEnd = z(trace.end, trace.end.z + 1), destination = world.pointArea(traceEnd);
     const destinationArea = aasAt(world.areas, destination);
     for (let i = 0; i < destinationArea.faceCount; i++) {
       const face = aasAt(world.faces, Math.abs(aasAt(world.faceIndexes, destinationArea.firstFace + i)));
       if ((face.flags & 2) !== 0 && integerAbs(dot3(aasAt(world.planes, face.plane).normal, UP)) < 0.1) return false;
     }
-    if (destination === from || this.context.exists(from, destination) || this.context.exists(destination, from)
-      || !(f(start.z - traceEnd.z) < maximumHeight)) return false;
+    if (destination === from || this.context.exists(from, destination) || this.context.exists(destination, from)) return false;
+    if (!(f(start.z - traceEnd.z) < maximumHeight)) {
+      if (this.context.debugState.profile.reachDebug) this.context.log(`jump too high between area ${destination} and ${from}\r\n`);
+      return false;
+    }
     const first = this.context.allocate();
     if (first === null) return false;
     first.area = destination; first.face = best.number1; first.edge = lowest.edge; first.start = lowest.point;
     first.end = traceEnd; first.travelType = TravelType.LADDER; first.travelTime = 10;
     this.link(from, first);
+    this.context.debugState.count("ladder");
     const second = this.context.allocate();
     if (second === null) return false;
     second.area = from; second.face = best.number1; second.edge = lowest.edge; second.start = traceEnd;
     const finish = ma(lowest.point, -5, plane1.normal);
     second.end = z(finish, finish.z + 10); second.travelType = TravelType.JUMP; second.travelTime = 10;
     this.link(destination, second);
+    this.context.debugState.count("jump");
     return true;
   }
 
@@ -633,6 +653,7 @@ export class AasReachabilityGeometry {
               else if (aasFallDelta(settings, distance) > settings.fallDelta10) reach.travelTime = f(reach.travelTime + settings.fallDamage10Time);
             }
             this.link(areaNumber, reach);
+            this.context.debugState.count("walkoffledge");
           }
         }
       }

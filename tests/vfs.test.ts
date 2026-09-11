@@ -222,8 +222,8 @@ describe("Quake virtual filesystem", () => {
       expect(vfs.pakReferences.snapshot().map(row => row.pack.basename)).toEqual(["a", "\xe9", "\xc3\xa9"]);
       expect(readTextSync(vfs, "loose.cfg")).toBe(`loose-${game}`);
       expect(readTextSync(vfs, "shared.cfg")).toBe(`packed-${game}-a`);
-      expect(vfs.source("raw.cfg")).toEqual({ kind: "pk3", game, path: "raw.cfg", archivePath: join(dataPath, game, "\xe9.pk3") });
-      expect(vfs.source("loose.cfg")).toEqual({ kind: "loose", game, path: "loose.cfg", filePath: join(dataPath, game, "loose.cfg") });
+      expect(vfs.source("raw.cfg")).toEqual({ kind: "pk3", game, path: "raw.cfg", archivePath: join(Buffer.from(dataPath).toString("latin1"), game, "\xe9.pk3") });
+      expect(vfs.source("loose.cfg")).toEqual({ kind: "loose", game, path: "loose.cfg", filePath: join(Buffer.from(dataPath).toString("latin1"), game, "loose.cfg") });
       for (const [path, expected] of [["raw.cfg", "\xe9"], ["utf8.cfg", "\xc3\xa9"]]) {
         if (path === undefined || expected === undefined) throw new Error("Incomplete native path fixture");
         expect(readTextSync(vfs, path)).toBe(expected);
@@ -490,7 +490,7 @@ describe("Quake virtual filesystem", () => {
       f.cvars.set("fs_basepath", nextBase, true);
       f.cvars.set("fs_homepath", nextHome, true);
       f.cvars.set("fs_cdpath", nextCd, true);
-      expect([roots.dataPath, roots.homePath, roots.cdPath]).toEqual([nextBase, nextHome, nextCd]);
+      expect([roots.dataPath.sourceText, roots.homePath.sourceText, roots.cdPath?.sourceText]).toEqual([nextBase, nextHome, nextCd]);
       expect(f.files.current.readFileLength("base.cfg")).toBe(-1);
       expect(readTextSync(f.files.current, "winner.cfg")).toBe("old home");
       const newWriter = f.files.writable.openBinaryWrite("new.dat");
@@ -863,11 +863,11 @@ describe("Quake virtual filesystem", () => {
   test("rejects NUL in filesystem roots", async () => {
     const path = await makeDataTree();
     await expect(VirtualFileSystem.openInspection({ dataPath: "bad\0base", homePath: path, cdPath: null, product: "baseq3" }))
-      .rejects.toThrow("Base path contains NUL");
+      .rejects.toThrow("Filesystem root contains NUL");
     await expect(VirtualFileSystem.openInspection({ dataPath: path, homePath: "bad\0home", cdPath: null, product: "baseq3" }))
-      .rejects.toThrow("Home path contains NUL");
+      .rejects.toThrow("Filesystem root contains NUL");
     await expect(VirtualFileSystem.openInspection({ dataPath: path, homePath: path, cdPath: "bad\0cd", product: "baseq3" }))
-      .rejects.toThrow("CD path contains NUL");
+      .rejects.toThrow("Filesystem root contains NUL");
   });
 
   test("restart retains the reached search paths and pack owner after a later mount failure", async () => {

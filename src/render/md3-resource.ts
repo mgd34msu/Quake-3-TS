@@ -175,6 +175,86 @@ class Resource implements Md3Model {
 }
 
 export function md3FrameCount(model: Md3Model): number { return model instanceof Resource ? model.numFrames : model.frames.length; }
+
+export type Md3SurfaceTransfer =
+  | { readonly kind: "allocation"; readonly bytes: Uint8Array; readonly source: string; readonly offset: number }
+  | { readonly kind: "decoded"; readonly surface: Md3Surface };
+
+function isTransferObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function transferObject(value: unknown): Readonly<Record<string, unknown>> {
+  if (!isTransferObject(value)) throw new TypeError("Invalid MD3 transfer record");
+  return value;
+}
+
+function isTransferArray(value: unknown): value is readonly unknown[] { return Array.isArray(value); }
+
+function transferArray(value: unknown): readonly unknown[] {
+  if (!isTransferArray(value)) throw new TypeError("Invalid MD3 transfer array");
+  return value;
+}
+
+function transferNumber(value: unknown): number {
+  if (typeof value !== "number") throw new TypeError("Invalid MD3 transfer number");
+  return value;
+}
+
+function transferString(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Invalid MD3 transfer string");
+  return value;
+}
+
+function transferVec3(value: unknown): Vec3 {
+  const record = transferObject(value);
+  return { x: transferNumber(record["x"]), y: transferNumber(record["y"]), z: transferNumber(record["z"]) };
+}
+
+export function parseMd3SurfaceTransfer(input: unknown): Md3SurfaceTransfer {
+  const value = transferObject(input);
+  if (value["kind"] === "allocation") {
+    const bytes = value["bytes"], offset = transferNumber(value["offset"]);
+    if (!(bytes instanceof Uint8Array) || !Number.isSafeInteger(offset) || offset < 0 || offset > bytes.byteLength - 108)
+      throw new RangeError("Invalid MD3 transferred allocation");
+    return { kind: "allocation", bytes: new Uint8Array(bytes), offset, source: transferString(value["source"]) };
+  }
+  if (value["kind"] !== "decoded") throw new TypeError("Invalid MD3 transfer kind");
+  const surface = transferObject(value["surface"]);
+  return { kind: "decoded", surface: { name: transferString(surface["name"]), flags: transferNumber(surface["flags"]),
+    shaders: transferArray(surface["shaders"]).map(input => {
+      const shader = transferObject(input);
+      return { name: transferString(shader["name"]), index: transferNumber(shader["index"]) };
+    }),
+    triangles: transferArray(surface["triangles"]).map(input => {
+      const triangle = transferArray(transferObject(input)["indices"]);
+      if (triangle.length !== 3) throw new RangeError("MD3 transferred triangle must contain three indices");
+      return { indices: [transferNumber(triangle[0]), transferNumber(triangle[1]), transferNumber(triangle[2])] };
+    }),
+    texCoords: transferArray(surface["texCoords"]).map(input => {
+      const coordinate = transferObject(input);
+      return { x: transferNumber(coordinate["x"]), y: transferNumber(coordinate["y"]) };
+    }),
+    frames: transferArray(surface["frames"]).map(frame => transferArray(frame).map(input => {
+      const vertex = transferObject(input);
+      return { position: transferVec3(vertex["position"]), normal: transferVec3(vertex["normal"]) };
+    })),
+  } };
+}
+
+/** Copy the retained allocation without walking mesh payloads ahead of RB_SurfaceMesh. */
+export function captureMd3Surface(surface: Md3Surface): Md3SurfaceTransfer {
+  if (surface instanceof ResourceSurface) return { kind: "allocation", bytes: new Uint8Array(surface.allocation.bytes),
+    source: surface.allocation.source, offset: surface.offset };
+  return { kind: "decoded", surface: structuredClone(surface) };
+}
+
+export function restoreMd3Surface(transfer: Md3SurfaceTransfer): Md3Surface {
+  if (transfer.kind === "decoded") return structuredClone(transfer.surface);
+  if (!Number.isSafeInteger(transfer.offset) || transfer.offset < 0 || transfer.offset > transfer.bytes.byteLength - 108)
+    throw new RangeError("MD3 transferred surface lies outside its retained allocation");
+  return new ResourceSurface(new Resource(new Uint8Array(transfer.bytes), transfer.source), transfer.offset);
+}
 export function md3TagCount(model: Md3Model): number {
   if (model instanceof Resource) return model.i32(80, "tag count");
   const tags = model.tags[0];

@@ -8,10 +8,11 @@ import { loadGl, loadGlCompiledVertexArrays } from "../../platform/gl.ts";
 import type { Vec4 } from "../../core/math.ts";
 import type { SourceGeometryAllocation, SourceStageCell } from "../types.ts";
 import type { SourceGlExtensionSettings } from "../settings.ts";
-import { createLoggedGlCalls } from "./logging.ts";
-import type { GlCallLogging, GlCalls } from "./logging.ts";
+import { createCheckedGlCalls, createLoggedGlCalls } from "./logging.ts";
+import { applyAppleTransformHint } from "../platform-diagnostics.ts";
+import type { GlCallLoggingSink, GlCalls } from "./logging.ts";
 import { CommonError } from "../../core/common-error.ts";
-import type { SdlWindow } from "../../platform/sdl.ts";
+import type { SdlRenderContext } from "../../platform/sdl-render-context.ts";
 import type { CinematicUpload } from "../cinematic-command.ts";
 import type { Rect2D } from "../draw2d.ts";
 import type { BeginImageOperation, RendererImage, RendererImageCatalog, ImageInternalFormat, ImageResourceOperation, ImageUploadPhase } from "../image-resource.ts";
@@ -74,7 +75,7 @@ function storeFloat4(target: Float32Array, x: number, y: number, z: number, w: n
   if (!Number.isInteger(offset) || offset < 0 || offset + 4 > target.length) { target.set([x, y, z, w], offset); return; }
   target[offset] = x; target[offset + 1] = y; target[offset + 2] = z; target[offset + 3] = w;
 }
-const activeContexts = new WeakSet<SdlWindow>();
+const activeContexts = new WeakSet<SdlRenderContext>();
 interface GlContextState {
   currentUnit: 0 | 1;
   depthRange: readonly [number, number];
@@ -86,7 +87,7 @@ interface GlContextState {
   extensionsInitialized: boolean;
 }
 // GLimp_Shutdown clears glState. RE_Shutdown(false) retains it with the context.
-const contextStates = new WeakMap<SdlWindow, GlContextState>();
+const contextStates = new WeakMap<SdlRenderContext, GlContextState>();
 
 /** GLW_InitExtensions uses Q_stristr, without promoting core-version or ARB env-add support. */
 export function sourceGlCapabilities(extensions: string, textureUnits: number): { readonly textureUnits: number; readonly textureEnvAdd: boolean } {
@@ -173,14 +174,17 @@ export class GlRenderer implements RendererBackend {
   readonly driver: { readonly vendor: string; readonly renderer: string; readonly version: string };
   readonly capabilities: { readonly textureUnits: number; readonly textureEnvAdd: boolean };
 
-  constructor(readonly window: SdlWindow, readonly images: RendererImageCatalog, private readonly logging: GlCallLogging | null = null) {
+  constructor(readonly window: SdlRenderContext, readonly images: RendererImageCatalog, private readonly logging: GlCallLoggingSink | null = null) {
     if (activeContexts.has(window)) throw new Error("SDL window/context already has an active GL renderer");
     activeContexts.add(window);
     if (!contextStates.has(window)) logging?.resetCalls();
     let library: ReturnType<typeof loadGl> | null = null;
     try {
+      // Capability/resource initialization needs the context even when the next frame is disabled.
+      window.setRenderingEnabled(true);
       this.library = loadGl(window); library = this.library;
-      this.gl = createLoggedGlCalls(this.library.symbols, logging);
+      this.gl = createCheckedGlCalls(createLoggedGlCalls(this.library.symbols, logging), logging?.errors ?? null,
+        () => this.library.symbols.glGetError());
       const gl = this.gl;
       const size = window.drawableSize; this.width = size.width; this.height = size.height;
       this.driver = { vendor: String(gl.glGetString(0x1f00)), renderer: String(gl.glGetString(0x1f01)), version: String(gl.glGetString(0x1f02)) };
@@ -288,6 +292,23 @@ export class GlRenderer implements RendererBackend {
     this.logging?.comment("glUnlockArraysEXT\n");
   }
   endFrameLogging(): void { this.available(); this.logging?.endFrame(); }
+  checkDiagnosticFrameErrors(): void {
+    this.available();
+    this.logging?.errors?.check("GLimp_EndFrame", () => this.library.symbols.glGetError());
+  }
+  initializeAppleTransformHint(enabled: () => boolean, print: (text: string) => undefined): void {
+    this.opened();
+    applyAppleTransformHint({ extensions: this.extensions, enabled, gl: this.gl,
+      print: text => { print(text); this.opened(); } });
+  }
+  /** Mac GLimp_EndFrame applies this after the actual swap. */
+  updateRenderingEnabled(value: number, print: (text: string) => undefined): void {
+    this.available();
+    if (Number(this.window.renderingEnabled) === value) return;
+    print(value !== 0 ? "--- Enabling Renderer ---\n" : "--- Disabling Renderer ---\n");
+    this.available();
+    this.window.setRenderingEnabled(value !== 0);
+  }
   private opened(): void { this.available(); this.window.makeCurrent(); }
   /** InitOpenGL reaches this after R_InitCommandBuffers and GfxInfo_f. */
   initializeDefaultState(multitexture: boolean, textureMode: () => undefined): void {

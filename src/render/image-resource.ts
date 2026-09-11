@@ -7,6 +7,7 @@ import { SOURCE_HUNK_RELEASE32 } from "./hunk-accounting.ts";
 import type { HunkAccountingProfile } from "./hunk-accounting.ts";
 import type { ImageUploadSteps } from "./image-upload.ts";
 import type { TextureFilter, TextureImage, TextureSampling } from "./types.ts";
+import type { SourceRendererHardware } from "./settings.ts";
 
 function dimension(value: number): void {
   if (!Number.isInteger(value) || value <= 0 || value > 0x7fffffff) throw new RangeError("Image dimensions must be positive int32 values");
@@ -171,6 +172,16 @@ export interface ImageCreationTarget {
   applyImageResource(operation: ImageResourceOperation): undefined;
 }
 
+export interface RendererImageIdentity {
+  readonly ordinal: number;
+  readonly name: string;
+  readonly sourceWidth: number;
+  readonly sourceHeight: number;
+  readonly mipmap: boolean;
+  readonly wrap: TextureSampling["wrap"];
+  readonly registrationUnit: 0 | 1;
+}
+
 type SessionState =
   | { readonly kind: "attaching"; readonly targets: ImageCreationTarget[] }
   | { readonly kind: "executing"; readonly targets: readonly [ImageCreationTarget, ...ImageCreationTarget[]] }
@@ -180,6 +191,7 @@ interface SessionRecord {
   state: SessionState;
 }
 interface CatalogData {
+  synchronize: () => void;
   frameCount: number;
   textureFilter: TextureFilter;
   bindingSettings: RendererBindingSettings;
@@ -208,7 +220,9 @@ function continued(data: CatalogData): void {
   if (data.status.kind === "poisoned") throw data.status.cause;
 }
 
-function mutate<T>(data: CatalogData, operation: () => T): T {
+function mutate<T>(data: CatalogData, operation: () => T, synchronize = true): T {
+  idle(data); healthy(data);
+  if (synchronize) data.synchronize();
   idle(data); healthy(data);
   data.scope = "resource";
   try {
@@ -313,7 +327,8 @@ class CatalogSession {
 
   /** A partial dynamic broadcast is terminal for every target and this catalog. */
   poison(cause: unknown): never {
-    live(this.data, this.record);
+    if (this.record.state.kind === "closed" || this.data.active !== this.record)
+      throw new Error("Renderer image session is closed");
     return fail(this.data, cause);
   }
 
@@ -335,6 +350,7 @@ export class RendererImageCatalog {
   constructor(initialTextureFilter: TextureFilter = "linear-mipmap-nearest",
     readonly hunk: HunkAccountingProfile = { kind: "unaccounted" }) {
     this.data = {
+      synchronize: () => {},
       frameCount: 0,
       textureFilter: initialTextureFilter,
       bindingSettings: { noBind: false },
@@ -342,6 +358,65 @@ export class RendererImageCatalog {
       journal: [], issued: new Set(), usedTargets: new WeakSet(), status: { kind: "ready" },
       active: null, nextEpoch: 0, scope: "idle",
     };
+  }
+
+  setResourceSynchronization(synchronize: () => void): void {
+    idle(this.data); healthy(this.data);
+    this.data.synchronize();
+    this.data.synchronize = synchronize;
+  }
+
+  /** Worker mirrors publish identities before replaying their ordered upload phases. */
+  importIdentity(identity: RendererImageIdentity): RendererImage {
+    return mutate(this.data, () => {
+      if (this.hunk.kind !== "unaccounted") throw new Error("Worker image identities require private catalog storage");
+      if (identity.ordinal !== this.data.issued.size) throw new Error("Worker image identities are out of order");
+      dimension(identity.sourceWidth); dimension(identity.sourceHeight);
+      const image = new CatalogImage(this, identity.ordinal, identity.name, identity.sourceWidth, identity.sourceHeight,
+        identity.mipmap, identity.wrap, identity.registrationUnit);
+      this.data.issued.add(image);
+      return image;
+    });
+  }
+
+  /** Replays source registration, never one-shot cinematic uploads. */
+  importResourceOperation(operation: ImageResourceOperation): undefined {
+    return mutate(this.data, () => {
+      switch (operation.kind) {
+        case "begin-image": this.requireOwned(operation.creation.image); break;
+        case "create-image": {
+          const { image, levels, internalFormat } = operation.creation;
+          this.requireOwned(image);
+          image.setUploadDescriptor(levels[0].width, levels[0].height, internalFormat);
+          break;
+        }
+        case "set-image-upload-descriptor":
+          this.requireOwned(operation.image);
+          operation.image.setUploadDescriptor(operation.width, operation.height, operation.internalFormat);
+          break;
+        case "dlight-image": case "finish-image-upload": case "upload-image-level": this.requireOwned(operation.image); break;
+        case "texture-mode": this.data.textureFilter = operation.filter; break;
+        case "current-border-color": break;
+      }
+      publish(this.data, operation);
+      return undefined;
+    });
+  }
+
+  /** Registration cursor is independent of backend attachment and contains static work only. */
+  resourceJournal(first: number): readonly ImageResourceOperation[] {
+    healthy(this.data);
+    if (!Number.isSafeInteger(first) || first < 0 || first > this.data.journal.length) throw new RangeError("Invalid image registration cursor");
+    return this.data.journal.slice(first);
+  }
+
+  importFrameState(frameCount: number, settings: RendererBindingSettings & RendererErrorSettings): void {
+    mutate(this.data, () => {
+      if (!Number.isInteger(frameCount) || frameCount !== (frameCount | 0)) throw new RangeError("Image frame count must be int32");
+      this.data.frameCount = frameCount;
+      this.data.bindingSettings = { noBind: settings.noBind };
+      this.data.errorSettings = { ignoreGLErrors: settings.ignoreGLErrors };
+    });
   }
 
   create(source: ImageSource): RendererImage {
@@ -473,7 +548,7 @@ export class RendererImageCatalog {
 
   /** RE_BeginFrame advances tr.frameCount before texture mode or gamma work. */
   beginFrame(): void {
-    mutate(this.data, () => { this.data.frameCount = (this.data.frameCount + 1) | 0; });
+    mutate(this.data, () => { this.data.frameCount = (this.data.frameCount + 1) | 0; }, false);
   }
 
   /** GL_Bind marks the requested image only when the selected texnum changes. */
@@ -562,7 +637,10 @@ export class RendererImageCatalog {
     });
   }
 
-  setTextureMode(sourceName: string): boolean {
+  setTextureMode(sourceName: string, profile: {
+    readonly hardware: SourceRendererHardware;
+    readonly print: (text: string) => void;
+  } = { hardware: "generic", print: () => {} }): boolean {
     return mutate(this.data, () => {
       // Q_stricmp folds only ASCII a..z and stops at the source string's NUL.
       let name = "";
@@ -581,6 +659,11 @@ export class RendererImageCatalog {
         case "GL_NEAREST_MIPMAP_LINEAR": filter = "nearest-mipmap-linear"; break;
         case "GL_LINEAR_MIPMAP_LINEAR": filter = "linear-mipmap-linear"; break;
         default: return false;
+      }
+      if (filter === "linear-mipmap-linear" && profile.hardware === "3dfx2d3d") {
+        profile.print("Refusing to set trilinear on a voodoo.\n");
+        continued(this.data);
+        filter = "linear-mipmap-nearest";
       }
       this.data.textureFilter = filter;
       publish(this.data, Object.freeze({ kind: "texture-mode", filter }));
