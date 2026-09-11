@@ -1,26 +1,33 @@
 // FreeType service used by id Software's renderer/tr_font.c. GPL-2.0-or-later.
-// ABI: installed FreeType freetype.h and ftimage.h, Linux LP64 little endian.
+// ABI: FreeType freetype.h/ftimage.h, 64-bit little-endian LP64 and Windows LLP64.
 import { dlopen, ptr } from "bun:ffi";
 import { endianness } from "node:os";
+import { freeTypeLayout, freeTypeMetric } from "./freetype-layout.ts";
+import type { FreeTypeLayout } from "./freetype-layout.ts";
+import { openNativeLibrary } from "./native-libraries.ts";
 
-function loadFreeType() {
-  return dlopen(process.env["QUAKE_FREETYPE_LIBRARY"] ?? "libfreetype.so.6", {
+function loadFreeType(layout: FreeTypeLayout) {
+  return openNativeLibrary("freetype", path => dlopen(path, {
     FT_Init_FreeType: { args: ["buffer"], returns: "i32" },
     FT_Done_FreeType: { args: ["u64"], returns: "i32" },
-    FT_New_Memory_Face: { args: ["u64", "buffer", "i64", "i64", "buffer"], returns: "i32" },
+    FT_New_Memory_Face: { args: ["u64", "buffer", layout.signedLong, layout.signedLong, "buffer"], returns: "i32" },
     FT_Done_Face: { args: ["u64"], returns: "i32" },
-    FT_Set_Char_Size: { args: ["u64", "i64", "i64", "u32", "u32"], returns: "i32" },
-    FT_Get_Char_Index: { args: ["u64", "u64"], returns: "u32" },
+    FT_Set_Char_Size: { args: ["u64", layout.signedLong, layout.signedLong, "u32", "u32"], returns: "i32" },
+    FT_Get_Char_Index: { args: ["u64", layout.unsignedLong], returns: "u32" },
     FT_Load_Glyph: { args: ["u64", "u32", "i32"], returns: "i32" },
-    FT_Outline_Translate: { args: ["u64", "i64", "i64"], returns: "void" },
+    FT_Outline_Translate: { args: ["u64", layout.signedLong, layout.signedLong], returns: "void" },
     FT_Outline_Get_Bitmap: { args: ["u64", "u64", "buffer"], returns: "i32" },
-  });
+  }));
 }
 
 function loadMemory() {
   // Native pointer out parameters are read as uint64, never cast to Bun Pointer.
-  // LP64 passes pointers and uint64 in the same integer argument registers.
-  return dlopen("libc.so.6", { memcpy: { args: ["buffer", "u64", "u64"], returns: "ptr" } });
+  // All supported ABIs pass pointers and uint64 in the same integer registers.
+  // Bun's read.ptr returns an unbranded number; its read/toArrayBuffer APIs
+  // require Pointer. memcpy copies into owned storage without a pointer cast.
+  return dlopen(process.platform === "win32" ? "msvcrt.dll"
+    : process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6",
+  { memcpy: { args: ["buffer", "u64", "u64"], returns: "ptr" } });
 }
 
 export interface FontGlyphBitmap {
@@ -41,23 +48,32 @@ export class FreeTypeFontLibrary {
   private readonly faces = new Map<bigint, Uint8Array>();
 
   private constructor(private readonly library: ReturnType<typeof loadFreeType>,
-    private readonly memory: ReturnType<typeof loadMemory>, handle: bigint) { this.handle = handle; }
+    private readonly memory: ReturnType<typeof loadMemory>, private readonly layout: FreeTypeLayout,
+    handle: bigint) { this.handle = handle; }
 
   static open(print: (text: string) => void): FreeTypeInitialization {
-    if (process.platform !== "linux" || process.arch !== "x64" || endianness() !== "LE") return { kind: "unavailable" };
+    const layout = freeTypeLayout(process.platform, process.arch, endianness());
+    if (layout === null) return { kind: "unavailable" };
     let library: ReturnType<typeof loadFreeType>;
-    try { library = loadFreeType(); } catch { return { kind: "unavailable" }; }
-    const memory = loadMemory(), result = new Uint8Array(8);
+    try { library = loadFreeType(layout); } catch { return { kind: "unavailable" }; }
+    let memory: ReturnType<typeof loadMemory>;
+    try { memory = loadMemory(); } catch { library.close(); return { kind: "unavailable" }; }
+    const result = new Uint8Array(8);
     if (library.symbols.FT_Init_FreeType(result) !== 0) {
       memory.close(); library.close(); print("R_InitFreeType: Unable to initialize FreeType.\n"); return { kind: "failed" };
     }
     const handle = new DataView(result.buffer).getBigUint64(0, true);
     if (handle === 0n) { memory.close(); library.close(); throw new Error("FreeType initialized a null library"); }
-    return { kind: "ready", library: new FreeTypeFontLibrary(library, memory, handle) };
+    return { kind: "ready", library: new FreeTypeFontLibrary(library, memory, layout, handle) };
   }
 
   createFace(bytes: Uint8Array, size: number, print: (text: string) => void): bigint | null {
     this.requireOpen();
+    // FT_New_Memory_Face's length is signed long, including on Windows.
+    if (bytes.length > 0x7fffffff) throw new RangeError("FreeType font exceeds source int32 length");
+    if (bytes.length === 0) {
+      print("RE_RegisterFont: FreeType2, unable to allocate new face.\n"); return null;
+    }
     const result = new Uint8Array(8);
     if (this.library.symbols.FT_New_Memory_Face(this.handle, bytes, bytes.length, 0, result) !== 0) {
       print("RE_RegisterFont: FreeType2, unable to allocate new face.\n"); return null;
@@ -77,16 +93,14 @@ export class FreeTypeFontLibrary {
     const api = this.library.symbols;
     // The source ignores FT_Load_Glyph's error and inspects the current slot.
     api.FT_Load_Glyph(face, api.FT_Get_Char_Index(face, code), 0);
-    // FT_FaceRec.glyph = 152; FT_GlyphSlotRec metrics = 48, format = 144,
-    // bitmap = 152, outline = 200. FT_Pos and FT_Long are signed 64-bit.
-    const faceRecord = this.read(face, 160), slot = faceRecord.getBigUint64(152, true);
+    const faceRecord = this.read(face, this.layout.faceGlyph + 8), slot = faceRecord.getBigUint64(this.layout.faceGlyph, true);
     if (slot === 0n) throw new Error("FreeType face has no glyph slot");
-    const glyph = this.read(slot, 240);
-    if (glyph.getUint32(144, true) !== 0x6f75746c) {
+    const glyph = this.read(slot, this.layout.slotFormat + 4);
+    if (glyph.getUint32(this.layout.slotFormat, true) !== 0x6f75746c) {
       print("Non-outline fonts are not supported\n"); return null;
     }
-    const width26 = this.metric(glyph, 48), height26 = this.metric(glyph, 56);
-    const bearingX = this.metric(glyph, 64), bearingY = this.metric(glyph, 72);
+    const width26 = this.metric(glyph, 0), height26 = this.metric(glyph, 1);
+    const bearingX = this.metric(glyph, 2), bearingY = this.metric(glyph, 3);
     const left = bearingX & -64, right = (bearingX + width26 + 63) & -64;
     const top = (bearingY + 63) & -64, bottom = (bearingY - height26) & -64;
     const width = (right - left) >> 6, height = (top - bottom) >> 6, pitch = (width + 3) & -4;
@@ -96,10 +110,11 @@ export class FreeTypeFontLibrary {
     const bitmap = new Uint8Array(40), view = new DataView(bitmap.buffer);
     view.setUint32(0, height, true); view.setUint32(4, width, true); view.setInt32(8, pitch, true);
     view.setBigUint64(16, BigInt(ptr(pixels)), true); view.setUint16(24, 256, true); view.setUint8(26, 2);
-    api.FT_Outline_Translate(slot + 200n, -left, -bottom);
-    api.FT_Outline_Get_Bitmap(this.handle, slot + 200n, bitmap);
+    const outline = slot + BigInt(this.layout.slotOutline);
+    api.FT_Outline_Translate(outline, -left, -bottom);
+    api.FT_Outline_Get_Bitmap(this.handle, outline, bitmap);
     return { height, pitch, top: (bearingY >> 6) + 1, bottom,
-      xSkip: (this.metric(glyph, 80) >> 6) + 1, pixels: pixels.subarray(0, pitch * height) };
+      xSkip: (this.metric(glyph, 4) >> 6) + 1, pixels: pixels.subarray(0, pitch * height) };
   }
 
   releaseFace(face: bigint): void {
@@ -120,9 +135,7 @@ export class FreeTypeFontLibrary {
     this.memory.symbols.memcpy(bytes, address, length);
     return new DataView(bytes.buffer);
   }
-  private metric(view: DataView, offset: number): number {
-    const value = view.getBigInt64(offset, true);
-    if (value < -2147483648n || value > 2147483647n) throw new RangeError("FreeType metric exceeds source int32");
-    return Number(value);
+  private metric(view: DataView, index: number): number {
+    return freeTypeMetric(view, 48 + index * this.layout.longBytes, this.layout);
   }
 }

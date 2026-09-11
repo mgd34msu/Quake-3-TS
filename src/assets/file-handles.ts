@@ -1,7 +1,8 @@
 // Ported from id Software's code/qcommon/files.c.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 
-import { closeSync, fstatSync, readFileSync, readSync } from "node:fs";
+import { closeSync, fstatSync, readSync } from "node:fs";
+import { nativeFileOperations } from "../platform/file-native.ts";
 import { Buffer } from "node:buffer";
 import { CommonError } from "../core/common-error.ts";
 import type { Pk3FileReader } from "./pk3.ts";
@@ -262,10 +263,7 @@ export class SourceFileHandles {
   private tellRegular(resource: LooseReadResource | WriteResource): number {
     let offset = resource.position;
     if (offset === null) {
-      const information = readFileSync(`/proc/self/fdinfo/${resource.descriptor}`, "utf8");
-      const position = /^pos:\s*(\d+)$/m.exec(information)?.[1];
-      if (position === undefined) throw new Error("Cannot read writable file position");
-      offset = Number(position);
+      offset = nativeFileOperations().descriptorPosition(resource.descriptor);
     }
     if (!Number.isSafeInteger(offset)) throw new RangeError("Writable file position exceeds safe integer range");
     return offset;

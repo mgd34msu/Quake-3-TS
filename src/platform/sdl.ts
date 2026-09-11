@@ -6,11 +6,14 @@
 import { dlopen, linkSymbols, ptr, toArrayBuffer } from "bun:ffi";
 import type { Pointer } from "bun:ffi";
 import { endianness } from "node:os";
+import { isMainThread } from "node:worker_threads";
+import { defaultOpenGlDriver, openNativeLibrary } from "./native-libraries.ts";
 import { SdlRenderContextLease } from "./sdl-render-context.ts";
 import type { SdlRenderContextTransfer } from "./sdl-render-context.ts";
 
 function loadSdl() {
-  return dlopen(process.env["QUAKE_SDL2_LIBRARY"] ?? "libSDL2-2.0.so.0", {
+  const loaded = openNativeLibrary("sdl2", path => dlopen(path, {
+    SDL_SetMainReady: { args: [], returns: "void" },
     SDL_InitSubSystem: { args: ["u32"], returns: "i32" },
     SDL_SetHint: { args: ["buffer", "buffer"], returns: "i32" },
     SDL_QuitSubSystem: { args: ["u32"], returns: "void" },
@@ -76,7 +79,9 @@ function loadSdl() {
     SDL_GL_GetDrawableSize: { args: ["ptr", "buffer", "buffer"], returns: "void" },
     SDL_GL_GetProcAddress: { args: ["buffer"], returns: "ptr" },
     SDL_GL_SwapWindow: { args: ["ptr"], returns: "void" },
-  });
+  }));
+  loaded.symbols.SDL_SetMainReady();
+  return loaded;
 }
 
 let library: ReturnType<typeof loadSdl> | undefined;
@@ -397,6 +402,7 @@ export class SdlWindow {
   }
 
   static open(options: SdlWindowOptions): SdlWindow {
+    if (!isMainThread) throw new Error("SDL window lifetime belongs to the main thread");
     SdlWindow.requireWindowListOwnership();
     for (const dimension of [options.width, options.height]) {
       if (!Number.isInteger(dimension) || dimension <= 0 || dimension > 16384) throw new Error("SDL window dimensions must be integers in 1..16384");
@@ -428,7 +434,7 @@ export class SdlWindow {
     }
     // SDL's EGL/offscreen loader can accept a path without loading that library.
     // This replacement supports the system GL library, not legacy vendor drivers.
-    if (driver !== null && driver !== "libGL.so.1")
+    if (driver !== null && driver.toLowerCase() !== defaultOpenGlDriver().toLowerCase())
       throw new Error(`Unsupported SDL system OpenGL driver: ${driver}`);
     const api = sdl();
     initializeSubsystem(videoSubsystem, "SDL_InitSubSystem");

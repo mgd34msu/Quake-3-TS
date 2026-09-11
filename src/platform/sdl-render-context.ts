@@ -4,6 +4,7 @@
 import { dlopen, ptr } from "bun:ffi";
 import type { Pointer } from "bun:ffi";
 import { isMainThread } from "node:worker_threads";
+import { openNativeLibrary } from "./native-libraries.ts";
 
 export interface SdlRenderContext {
   readonly drawableSize: { readonly width: number; readonly height: number };
@@ -22,7 +23,7 @@ export interface SdlRenderContextTransfer {
 }
 
 function loadSdlRenderContext() {
-  return dlopen(process.env["QUAKE_SDL2_LIBRARY"] ?? "libSDL2-2.0.so.0", {
+  return openNativeLibrary("sdl2", path => dlopen(path, {
     SDL_GetError: { args: [], returns: "cstring" },
     SDL_GetWindowFromID: { args: ["u32"], returns: "ptr" },
     SDL_SetWindowData: { args: ["ptr", "buffer", "ptr"], returns: "ptr" },
@@ -32,7 +33,7 @@ function loadSdlRenderContext() {
     SDL_GL_GetDrawableSize: { args: ["ptr", "buffer", "buffer"], returns: "void" },
     SDL_GL_GetProcAddress: { args: ["buffer"], returns: "ptr" },
     SDL_GL_SwapWindow: { args: ["ptr"], returns: "void" },
-  });
+  }));
 }
 let library: ReturnType<typeof loadSdlRenderContext> | null = null;
 function sdl() { library ??= loadSdlRenderContext(); return library.symbols; }
@@ -54,6 +55,9 @@ export class SdlRenderContextLease {
 
   static detach(window: Pointer, context: Pointer, windowId: number): SdlRenderContextLease {
     if (!isMainThread) throw new Error("SDL window lifetime belongs to the main thread");
+    // Cocoa may synchronously dispatch drawable updates onto the main queue.
+    // The frontend's synchronous worker waits cannot service that queue.
+    if (process.platform === "darwin") throw new Error("SDL OpenGL render workers require main-queue dispatch support on macOS; use the serial renderer");
     const api = sdl();
     if (api.SDL_GL_GetCurrentContext() !== context) throw new Error("SDL context must be current before detach");
     const transfer = { windowId, key: `quake3-render-${crypto.randomUUID()}`, ownership: new SharedArrayBuffer(4) };

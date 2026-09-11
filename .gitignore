@@ -3,6 +3,7 @@ node_modules/
 dist/
 .artifacts/
 coverage/
+/platform-logs/
 
 # Reference archives and game data must stay outside the source repository.
 *.bundle

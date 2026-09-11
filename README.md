@@ -8,11 +8,11 @@ Playable client and dedicated-server paths are integrated for both games. Source
 
 ## Requirements
 
-- Linux x86-64 with glibc. Current platform code depends on Linux interfaces.
+- Linux x86-64 or ARM64 with glibc, macOS Intel or Apple Silicon, or Windows x86-64. See [platform requirements and verification limits](docs/PLATFORMS.md).
 - Bun 1.3.14 or later for source runs and builds. Bun 1.3.14 is the verified version.
-- SDL2, with `libSDL2-2.0.so.0` available to the loader, for the graphical client.
-- A system OpenGL driver, normally available through `libGL.so.1`, for `--renderer gl`.
-- Optional system FreeType (`libfreetype.so.6`) for generating fonts without prebuilt DAT files.
+- SDL2 for the graphical client.
+- A system OpenGL driver for `--renderer gl`.
+- Optional system FreeType for generating fonts without prebuilt DAT files.
 - Your own installed Quake III Arena retail data. Team Arena also requires its expansion data.
 
 Select the installation root that contains the product directories, not `baseq3` itself:
@@ -29,6 +29,26 @@ Select the installation root that contains the product directories, not `baseq3`
 
 Keep the original installation's patch packages alongside its `pak0.pk3` files. The port reads the installation directly. Retail assets are not included in this repository or bundled into the executable.
 
+## Download
+
+Download your platform's ZIP from [Releases](https://github.com/mgd34msu/Quake-3-TS/releases). Extract it and install SDL2 as described in [Platform requirements](docs/PLATFORMS.md). The executable includes Bun; you do not need Bun or this source checkout to play.
+
+On Linux or macOS, open a terminal in the extracted directory:
+
+```sh
+mkdir -p "$HOME/.local/share/quake3-ts"
+./quake3-ts client --data /path/to/Quake3 --home "$HOME/.local/share/quake3-ts" --renderer gl -- +echo menu
+```
+
+On Windows, use PowerShell in the extracted directory:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Quake3-TS" | Out-Null
+.\quake3-ts.exe client --data "C:\Games\Quake3" --home "$env:LOCALAPPDATA\Quake3-TS" --renderer gl -- +echo menu
+```
+
+Replace the data path with your installation root. To start Team Arena, add `--product missionpack` before `--`. To start directly in a match, replace `+echo menu` with `+map q3dm1`, or `+map mpteam1` for Team Arena.
+
 ## Build
 
 From the source checkout, install the locked dependencies, including development dependencies, and build:
@@ -40,9 +60,11 @@ bun run build
 
 Do not use `--production` for this install. The build needs the TypeScript compiler and Bun type definitions in `devDependencies`.
 
-The result is `dist/quake3-ts`, with the Bun runtime included. It still needs the platform libraries and retail data described above. Rebuild after source changes to include them in the executable.
+The result is `dist/quake3-ts` (`dist/quake3-ts.exe` on Windows), with the Bun runtime included. It still needs the platform libraries and retail data described above. Rebuild after source changes to include them in the executable.
 
 The build runs type and policy checks against a captured copy of its inputs, then verifies that the inputs have not changed before publishing the executable. It records source and binary hashes in `dist/build.json`. These build checks do not replace the full test run.
+
+To build all five release ZIPs on Linux, install `zip` and `unzip`, use Bun 1.3.14, then run `bun run release:build`. Archives and `checksums.txt` appear in `dist/releases`. This command does not publish to GitHub. Each archive contains only its executable, launch documentation, and license notices.
 
 Custom builds can override the original master and authorization endpoints:
 

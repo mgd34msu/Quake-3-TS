@@ -193,7 +193,7 @@ export class CommonFrameDriver {
   }
 
   private async initialize(): Promise<void> {
-    this.options.platformPrint(`Q3 1.32b linux-ts ${this.options.buildDate}\n`);
+    this.options.platformPrint(`Q3 1.32b ${process.platform}-ts ${this.options.buildDate}\n`);
     const startup = new StartupCommands(this.options.startupText);
     const random = this.options.random ?? new LinuxNativeRandom(1);
     const owner = this;

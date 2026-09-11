@@ -622,7 +622,7 @@ export class EngineClient implements CommonClientBootstrap, CommonClientRuntime 
       get height() { return client.rendererInfo.vidHeight; },
       get worldBaseName() { return resources?.worldBaseName ?? null; },
     };
-    const registered = new RegisteredRendererCvars(this.common.cvars, "linux", this.videoSettingsRegistered ? null : this.options, text => this.print(text));
+    const registered = new RegisteredRendererCvars(this.common.cvars, process.platform === "linux" ? "linux" : "other", this.videoSettingsRegistered ? null : this.options, text => this.print(text));
     for (const [name, value] of [["vid_screen", "-1"], ["r_minDisplayRefresh", "0"], ["r_maxDisplayRefresh", "0"],
       ["vid_xpos", "3"], ["vid_ypos", "22"]] satisfies readonly (readonly [string, string])[])
       this.common.cvars.register(name, value, CvarFlag.Archive);

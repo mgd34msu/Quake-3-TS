@@ -6,18 +6,12 @@ import {
   constants,
   fstatSync,
   ftruncateSync,
-  lstatSync,
-  linkSync,
-  mkdirSync,
-  openSync,
-  realpathSync,
   readSync,
-  renameSync,
-  unlinkSync,
   writeSync,
 } from "node:fs";
-import type { Stats } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, parse, relative, resolve } from "node:path";
+import { containedNativePath, nativeFileOperations, sourceNativeComponent, writableHostPath } from "../platform/file-native.ts";
+import type { FileChildInformation } from "../platform/file-native-types.ts";
 import type { Product } from "../shared/definitions.ts";
 import { BufferedLog } from "./buffered-log.ts";
 import { SourceFileHandles } from "./file-handles.ts";
@@ -53,7 +47,7 @@ export interface WritableFileSystemOptions {
 type PathInspection =
   | { readonly kind: "missing" }
   | { readonly kind: "unavailable"; readonly error: unknown }
-  | { readonly kind: "present"; readonly stats: Stats };
+  | { readonly kind: "present"; readonly stats: FileChildInformation };
 
 function errorCode(error: unknown): string | undefined {
   if (
@@ -194,9 +188,9 @@ function sourceStringBytes(text: string): Uint8Array {
   return bytes;
 }
 
-function inspectPath(path: Buffer): PathInspection {
+function inspectPath(parent: number, name: Buffer): PathInspection {
   try {
-    return { kind: "present", stats: lstatSync(path) };
+    return { kind: "present", stats: nativeFileOperations().inspectChild(parent, name) };
   } catch (error) {
     if (errorCode(error) === "ENOENT") return { kind: "missing" };
     return { kind: "unavailable", error };
@@ -208,23 +202,9 @@ function isWithin(rootPath: string, candidatePath: string): boolean {
   return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
 }
 
-function isWithinBytes(rootPath: Buffer, candidatePath: Buffer): boolean {
-  return candidatePath.equals(rootPath) || (candidatePath.subarray(0, rootPath.length).equals(rootPath)
-    && (rootPath[rootPath.length - 1] === 47 || candidatePath[rootPath.length] === 47));
-}
-
-function childPath(descriptor: number, component: Buffer): Buffer {
-  return Buffer.concat([Buffer.from(`/proc/self/fd/${descriptor}/`), component]);
-}
-
 function descriptorPath(descriptor: number, requestedPath: string): Buffer {
-  if (process.platform !== "linux") {
-    throw new Error(
-      `Secure writable descriptor containment requires Linux /proc/self/fd: ${requestedPath}`,
-    );
-  }
   try {
-    return realpathSync(`/proc/self/fd/${descriptor}`, { encoding: "buffer" });
+    return nativeFileOperations().descriptorPath(descriptor);
   } catch (cause) {
     throw new Error(`Cannot verify open writable path: ${requestedPath}`, { cause });
   }
@@ -365,7 +345,6 @@ export class WritableFileSystem {
     const relativePath = checkedRelativePath(path), rootPath = this.rootPath;
     const targetPath = resolve(rootPath, relativePath);
     if (!isWithin(rootPath, targetPath)) throw new RangeError(`Unsafe writable path: ${path}`);
-    if (process.platform !== "linux") throw new Error("Secure writable descriptor containment requires Linux /proc/self/fd");
     const components = relativePath.split("/").filter(component => component.length > 0 && component !== ".");
     const filename = components.pop() ?? ".";
     const directorySyntax = relativePath === "." || relativePath.endsWith("/") || relativePath.endsWith("/.");
@@ -374,7 +353,7 @@ export class WritableFileSystem {
     try {
       const home = this.openHomeDirectory(acquisition, false);
       if (home === null) return false;
-      root = this.openChildReplacingParent(home, Buffer.from(this.gameDirectory, "latin1"), rootPath, acquisition, false);
+      root = this.openChildReplacingParent(home, sourceNativeComponent(this.gameDirectory), rootPath, acquisition, false);
       if (root === null) return false;
       parent = this.duplicateDirectory(root, rootPath, acquisition);
       if (parent === null) return false;
@@ -383,18 +362,18 @@ export class WritableFileSystem {
         parentPath = join(parentPath, component);
         const previous = parent;
         parent = null;
-        parent = this.openChildReplacingParent(previous, Buffer.from(component, "latin1"), parentPath, acquisition, false);
+        parent = this.openChildReplacingParent(previous, sourceNativeComponent(component), parentPath, acquisition, false);
         if (parent === null) return false;
       }
-      const openedPath = childPath(parent, Buffer.from(filename, "latin1"));
-      const stats = lstatSync(openedPath);
+      const name = sourceNativeComponent(filename);
+      const stats = nativeFileOperations().inspectChild(parent, name);
       if (stats.isSymbolicLink()) throw securityError(targetPath);
       // Unix fopen accepts directories. Other special files retain the
       // writable owner's regular-file/directory containment profile.
       if (!stats.isFile() && !stats.isDirectory()) return false;
-      descriptor = openSync(openedPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-        | (directorySyntax ? constants.O_DIRECTORY : 0));
-      if (!isWithinBytes(descriptorPath(root, rootPath), descriptorPath(descriptor, targetPath))) throw containmentError(targetPath);
+      descriptor = directorySyntax ? nativeFileOperations().openChildDirectory(parent, name)
+        : nativeFileOperations().openChild(parent, name, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0);
+      if (!containedNativePath(descriptorPath(root, rootPath), descriptorPath(descriptor, targetPath))) throw containmentError(targetPath);
       return true;
     } catch (error) {
       acquisition.caught(errorCode(error) === "ELOOP" ? securityError(targetPath) : error);
@@ -479,38 +458,38 @@ export class WritableFileSystem {
     };
     const home = this.openHomeDirectory(undefined, false, homeRoot);
     const root = home === null || gameDirectory === "" ? home
-      : this.openChildReplacingParent(home, Buffer.from(gameDirectory, "latin1"), directory, undefined, false);
+      : this.openChildReplacingParent(home, sourceNativeComponent(gameDirectory), directory, undefined, false);
     if (root === null) { copyNotice(); return; }
     let source: ServerParent | null = null, destination: ServerParent | null = null;
     try {
       source = this.renameParent(root, directory, fromRelative, false);
       destination = this.renameParent(root, directory, toRelative, false);
       if (source === null) { copyNotice(); return; }
-      const sourcePath = childPath(source.descriptor, Buffer.from(source.filename, "latin1"));
-      const sourceState = inspectPath(sourcePath);
+      const sourceName = sourceNativeComponent(source.filename);
+      const sourceState = inspectPath(source.descriptor, sourceName);
       if (sourceState.kind === "present") {
         if (sourceState.stats.isSymbolicLink()) throw securityError(fromPath);
         if (!sourceState.stats.isFile()) throw new Error(`Rename source is not a regular file: ${fromPath}`);
       }
       if (destination !== null) {
-        const destinationPath = childPath(destination.descriptor, Buffer.from(destination.filename, "latin1"));
-        const target = inspectPath(destinationPath);
+        const destinationName = sourceNativeComponent(destination.filename);
+        const target = inspectPath(destination.descriptor, destinationName);
         if (target.kind === "present" && target.stats.isSymbolicLink()) throw securityError(toPath);
-        try { renameSync(sourcePath, destinationPath); return; }
+        try { nativeFileOperations().renameChild(source.descriptor, sourceName, destination.descriptor, destinationName); return; }
         catch (cause) { if (!isPlatformFileFailure(cause)) throw cause; }
       }
       copyNotice();
       if (fromPath.includes("journal.dat") || fromPath.includes("journaldata.dat")) this.print("Ignoring journal files\n");
       else {
         let descriptor: number | null = null;
-        try { descriptor = openSync(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+        try { descriptor = nativeFileOperations().openChild(source.descriptor, sourceName, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0); }
         catch (cause) {
           if (errorCode(cause) === "ELOOP") throw securityError(fromPath);
           if (!isPlatformFileFailure(cause)) throw cause;
         }
         if (descriptor !== null) {
           try {
-            if (!fstatSync(descriptor).isFile() || !isWithinBytes(descriptorPath(root, directory), descriptorPath(descriptor, fromPath))) {
+            if (!fstatSync(descriptor).isFile() || !containedNativePath(descriptorPath(root, directory), descriptorPath(descriptor, fromPath))) {
               throw containmentError(fromPath);
             }
           } catch (cause) { closeSync(descriptor); throw cause; }
@@ -518,22 +497,22 @@ export class WritableFileSystem {
         if (descriptor !== null) copyDescriptor(descriptor, () => {
           if (destination === null) destination = this.renameParent(root, directory, toRelative, true);
           if (destination === null) return null;
-          const targetPath = childPath(destination.descriptor, Buffer.from(destination.filename, "latin1"));
-          const target = inspectPath(targetPath);
+          const targetName = sourceNativeComponent(destination.filename);
+          const target = inspectPath(destination.descriptor, targetName);
           if (target.kind === "unavailable") return null;
           if (target.kind === "present") {
             if (target.stats.isSymbolicLink()) throw securityError(toPath);
             if (!target.stats.isFile()) return null;
           }
           let output: number;
-          try { output = openSync(targetPath, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666); }
+          try { output = nativeFileOperations().openChild(destination.descriptor, targetName, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o666); }
           catch (cause) {
             if (errorCode(cause) === "ELOOP") throw securityError(toPath);
             if (!isPlatformFileFailure(cause)) throw cause;
             return null;
           }
           try {
-            if (!fstatSync(output).isFile() || !isWithinBytes(descriptorPath(root, directory), descriptorPath(output, toPath))) {
+            if (!fstatSync(output).isFile() || !containedNativePath(descriptorPath(root, directory), descriptorPath(output, toPath))) {
               throw containmentError(toPath);
             }
           } catch (cause) { closeSync(output); throw cause; }
@@ -547,7 +526,7 @@ export class WritableFileSystem {
         });
       }
       // Source removes the old name even when the nonfatal copy attempt failed.
-      try { unlinkSync(sourcePath); }
+      try { nativeFileOperations().unlinkChild(source.descriptor, sourceName); }
       catch (cause) { if (!isPlatformFileFailure(cause)) throw cause; }
     } finally {
       try { if (destination !== null) closeSync(destination.descriptor); }
@@ -565,10 +544,10 @@ export class WritableFileSystem {
       for (const component of components) {
         const parent = descriptor;
         descriptor = null;
-        descriptor = this.openChildReplacingParent(parent, Buffer.from(component, "latin1"), join(directory, path), undefined, create);
+        descriptor = this.openChildReplacingParent(parent, sourceNativeComponent(component), join(directory, path), undefined, create);
         if (descriptor === null) return null;
       }
-      if (!isWithinBytes(descriptorPath(root, directory), descriptorPath(descriptor, directory))) throw containmentError(directory);
+      if (!containedNativePath(descriptorPath(root, directory), descriptorPath(descriptor, directory))) throw containmentError(directory);
       const result = { descriptor, filename };
       descriptor = null;
       return result;
@@ -587,15 +566,15 @@ export class WritableFileSystem {
       destination = this.existingServerParent(root, toRelative);
       const canonicalRoot = descriptorPath(root, this.homePath);
       for (const parent of [source, destination]) {
-        if (!isWithinBytes(canonicalRoot, descriptorPath(parent.descriptor, this.homePath))) throw containmentError(this.homePath);
+        if (!containedNativePath(canonicalRoot, descriptorPath(parent.descriptor, this.homePath))) throw containmentError(this.homePath);
       }
-      const sourcePath = childPath(source.descriptor, Buffer.from(source.filename, "latin1"));
-      const destinationPath = childPath(destination.descriptor, Buffer.from(destination.filename, "latin1"));
-      const stats = lstatSync(sourcePath);
+      const sourceName = sourceNativeComponent(source.filename);
+      const destinationName = sourceNativeComponent(destination.filename);
+      const stats = nativeFileOperations().inspectChild(source.descriptor, sourceName);
       if (stats.isSymbolicLink()) throw securityError(from);
       if (!stats.isFile()) throw new Error(`Server rename source is not a regular file: ${from}`);
-      linkSync(sourcePath, destinationPath);
-      unlinkSync(sourcePath);
+      nativeFileOperations().linkChild(source.descriptor, sourceName, destination.descriptor, destinationName);
+      nativeFileOperations().unlinkChild(source.descriptor, sourceName);
     } finally {
       try { if (destination !== null) closeSync(destination.descriptor); }
       finally { try { if (source !== null) closeSync(source.descriptor); } finally { closeSync(root); } }
@@ -612,7 +591,7 @@ export class WritableFileSystem {
       for (const component of components) {
         const parent = descriptor;
         descriptor = null;
-        descriptor = this.openChildReplacingParent(parent, Buffer.from(component, "latin1"), join(this.homePath, path), undefined, false);
+        descriptor = this.openChildReplacingParent(parent, sourceNativeComponent(component), join(this.homePath, path), undefined, false);
         if (descriptor === null) throw new Error(`Cannot open server rename directory: ${path}`);
       }
       return { descriptor, filename };
@@ -712,9 +691,6 @@ export class WritableFileSystem {
     if (!isWithin(rootPath, targetPath) || targetPath === rootPath) {
       throw new RangeError(`Unsafe writable path: ${path}`);
     }
-    if (process.platform !== "linux") {
-      throw new Error("Secure writable descriptor containment requires Linux /proc/self/fd");
-    }
     const components = relativePath.split("/").filter(component => component.length > 0 && component !== ".");
     const filename = components.pop();
     if (filename === undefined) return unavailable(acquisition, new Error(`Writable path has no filename: ${path}`), true);
@@ -722,7 +698,7 @@ export class WritableFileSystem {
     const homeDescriptor = this.openHomeDirectory(acquisition, true, baseRoot);
     if (homeDescriptor === null) return null;
     const rootDescriptor = scope.kind === "server" ? homeDescriptor
-      : this.openChildReplacingParent(homeDescriptor, Buffer.from(gameDirectory, "latin1"), rootPath, acquisition);
+      : this.openChildReplacingParent(homeDescriptor, sourceNativeComponent(gameDirectory), rootPath, acquisition);
     if (rootDescriptor === null) return null;
 
     let descriptor: number | null = null;
@@ -735,13 +711,13 @@ export class WritableFileSystem {
           parentPath = join(parentPath, component);
           const previousDescriptor = parentDescriptor;
           parentDescriptor = null;
-          parentDescriptor = this.openChildReplacingParent(previousDescriptor, Buffer.from(component, "latin1"), parentPath, acquisition);
+          parentDescriptor = this.openChildReplacingParent(previousDescriptor, sourceNativeComponent(component), parentPath, acquisition);
           if (parentDescriptor === null) return null;
         }
 
         if (scope.kind === "server") scope.beforeOpen();
-        const openedTargetPath = childPath(parentDescriptor, Buffer.from(filename, "latin1"));
-        const target = inspectPath(openedTargetPath);
+        const targetName = sourceNativeComponent(filename);
+        const target = inspectPath(parentDescriptor, targetName);
         if (target.kind === "unavailable") return unavailable(acquisition, target.error);
         if (target.kind === "present" && target.stats.isSymbolicLink()) {
           throw securityError(targetPath);
@@ -752,8 +728,8 @@ export class WritableFileSystem {
 
         try {
           const modeFlags = mode === "append" ? constants.O_APPEND : mode === "exclusive" ? constants.O_EXCL : 0;
-          descriptor = openSync(
-            openedTargetPath,
+          descriptor = nativeFileOperations().openChild(
+            parentDescriptor, targetName,
             constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW
               | constants.O_NONBLOCK | modeFlags,
             0o666,
@@ -799,7 +775,7 @@ export class WritableFileSystem {
         }
         const canonicalRoot = descriptorPath(rootDescriptor, rootPath);
         const canonicalTarget = descriptorPath(descriptor, targetPath);
-        if (!isWithinBytes(canonicalRoot, canonicalTarget)) {
+        if (!containedNativePath(canonicalRoot, canonicalTarget)) {
           const failedDescriptor = descriptor;
           descriptor = null;
           const error = containmentError(targetPath);
@@ -889,17 +865,16 @@ export class WritableFileSystem {
 
   private openHomeDirectory(acquisition: FileAcquisition | undefined, create = true, baseRoot = this.homeRoot): number | null {
     let descriptor: number | null;
+    const spelling = writableHostPath(baseRoot.resolvedBytes()).toString("latin1");
+    const root = parse(spelling).root;
     try {
-      descriptor = openSync(
-        "/",
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      );
+      descriptor = nativeFileOperations().openDirectory(Buffer.from(root, "latin1"));
     } catch (error) {
       return unavailable(acquisition, error);
     }
 
-    let directoryPath = "/";
-    const components = baseRoot.resolvedBytes().toString("latin1").split("/").filter(component => component.length > 0);
+    let directoryPath = root;
+    const components = spelling.slice(root.length).split(process.platform === "win32" ? /[\\/]/ : "/").filter(component => component.length > 0);
     for (const component of components) {
       directoryPath = join(directoryPath, component);
       descriptor = this.openChildReplacingParent(descriptor, Buffer.from(component, "latin1"), directoryPath, acquisition, create);
@@ -943,8 +918,7 @@ export class WritableFileSystem {
   }
 
   private openChildDirectory(parent: number, component: Buffer, displayPath: string, acquisition: FileAcquisition | undefined, create: boolean): number | null {
-    const path = childPath(parent, component);
-    let inspection = inspectPath(path);
+    let inspection = inspectPath(parent, component);
     if (inspection.kind === "present" && inspection.stats.isSymbolicLink()) {
       throw securityError(displayPath);
     }
@@ -952,11 +926,11 @@ export class WritableFileSystem {
     if (inspection.kind === "missing") {
       if (!create) return unavailable(acquisition, new Error(`Writable parent is missing: ${displayPath}`), true);
       try {
-        mkdirSync(path);
+        nativeFileOperations().mkdirChild(parent, component);
       } catch (error) {
         if (errorCode(error) !== "EEXIST") return unavailable(acquisition, error);
       }
-      inspection = inspectPath(path);
+      inspection = inspectPath(parent, component);
       if (inspection.kind === "present" && inspection.stats.isSymbolicLink()) {
         throw securityError(displayPath);
       }
@@ -966,10 +940,7 @@ export class WritableFileSystem {
       return unavailable(acquisition, new Error(`Writable parent is not a directory: ${displayPath}`), true);
     }
     try {
-      return openSync(
-        path,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      );
+      return nativeFileOperations().openChildDirectory(parent, component);
     } catch (error) {
       if (errorCode(error) === "ELOOP") throw securityError(displayPath);
       return unavailable(acquisition, error);
@@ -978,10 +949,7 @@ export class WritableFileSystem {
 
   private duplicateDirectory(descriptor: number, displayPath: string, acquisition: FileAcquisition | undefined): number | null {
     try {
-      return openSync(
-        `/proc/self/fd/${descriptor}`,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NONBLOCK,
-      );
+      return nativeFileOperations().duplicateDirectory(descriptor);
     } catch (cause) {
       if (acquisition !== undefined) return unavailable(acquisition, cause);
       throw new Error(`Cannot retain writable directory: ${displayPath}`, { cause });

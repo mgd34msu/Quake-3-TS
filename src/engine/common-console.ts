@@ -487,7 +487,7 @@ export class CommonConsole {
       if (context.argv.length !== 2) { this.output.print("Usage: writeconfig <filename>\n"); return; }
       const path = configPath(argument(context, 1)); this.output.print(`Writing ${path}.\n`); this.writeConfig(path);
     });
-    this.cvars.register("version", `Q3 1.32b linux-ts ${buildDate}`, CvarFlag.ReadOnly | CvarFlag.ServerInfo);
+    this.cvars.register("version", `Q3 1.32b ${process.platform}-ts ${buildDate}`, CvarFlag.ReadOnly | CvarFlag.ServerInfo);
     this.assertCapabilities(); this.phase = "runtime";
     return dedicated;
   }

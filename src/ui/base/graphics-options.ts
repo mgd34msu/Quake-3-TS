@@ -1,5 +1,6 @@
 // Graphics options and Driver Info from id Software q3_ui/ui_video.c. GPL-2.0-or-later.
 import type { RendererConfigurationSnapshot } from "../../render/configuration.ts";
+import { defaultOpenGlDriver } from "../../platform/native-libraries.ts";
 import { UI_CENTER, UI_RIGHT, UI_SMALLFONT } from "../../render/font.ts";
 import { drawString } from "./draw.ts";
 import { addItem, drawMenu, popMenu, pushMenu, setCursorToItem } from "./framework.ts";
@@ -171,7 +172,7 @@ export class BaseGraphicsOptionsMenu {
     this.setValue("r_picmip", f(3 - f(r.tq.curvalue))); this.setValue("r_allowExtensions", r.extensions.curvalue);
     this.setValue("r_mode", r.mode.curvalue); this.setValue("r_fullscreen", r.fs.curvalue);
     // CPU has no native GL driver. Preserve its dormant cvar; GL uses the source Linux name.
-    if (this.uiConfiguration.backend === "gl") cvars.set("r_glDriver", "libGL.so.1", true);
+    if (this.uiConfiguration.backend === "gl") cvars.set("r_glDriver", defaultOpenGlDriver(), true);
     switch (r.colordepth.curvalue) {
       case 0: this.setValue("r_colorbits", 0); this.setValue("r_depthbits", 0); this.setValue("r_stencilbits", 0); break;
       case 1: this.setValue("r_colorbits", 16); this.setValue("r_depthbits", 16); this.setValue("r_stencilbits", 0); break;

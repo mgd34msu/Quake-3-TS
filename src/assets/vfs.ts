@@ -9,8 +9,10 @@ import {
   openSync,
   opendirSync,
   readdirSync,
+  realpathSync,
 } from "node:fs";
 import { join } from "node:path";
+import { sourceNativeComponent } from "../platform/file-native.ts";
 import { hostRootInput, NativeRoot } from "./native-root.ts";
 import type { RootInput } from "./native-root.ts";
 import type { MissingFileLog } from "./missing-file-log.ts";
@@ -232,30 +234,36 @@ function addListedName(names: string[], name: string): void {
 
 function looseOsPath(directory: Buffer, relative: string): Buffer {
   checkSourceListBytes(relative, "Loose path");
-  const path = Buffer.concat([directory, Buffer.from("/"), Buffer.from(relative, "latin1")]);
+  const path = Buffer.concat([directory, Buffer.from("/"), sourceNativeComponent(relative)]);
   if (path.length >= 4096) throw new RangeError("Loose filename exceeds the supported Unix MAX_OSPATH");
   return path;
 }
 
-function openListingDirectory(target: Buffer): Dir | null {
-  if (target.length >= 4096) throw new RangeError("File listing exceeds the supported Unix MAX_OSPATH");
-  // Check every ancestor before opening the directory; a symlink must not
-  // turn a product-relative listing into enumeration outside that root.
-  for (let end = 1; end <= target.length; end++) {
-    if (end < target.length && target[end] !== 47) continue;
-    try {
-      if (!lstatSync(target.subarray(0, end)).isDirectory()) return null;
-    } catch (error) {
-      if (isFileSystemFailure(error)) return null;
-      throw error;
-    }
-  }
+function openListingDirectory(directory: Buffer, relative: string): Dir | null {
   try {
-    return opendirSync(target, { encoding: "latin1" });
+    // Host ancestors may be aliases such as Darwin /tmp. The selected root
+    // itself and its source-relative descendants must still be directories.
+    if (!lstatSync(directory).isDirectory()) return null;
+    const canonical = realpathSync(directory, { encoding: "buffer" });
+    const target = looseOsPath(canonical, relative);
+    for (let end = canonical.length + 1; end <= target.length; end++) {
+      if (end < target.length && target[end] !== 47) continue;
+      if (!lstatSync(target.subarray(0, end)).isDirectory()) return null;
+    }
+    return opendirSync(target, { encoding: process.platform === "win32" ? "utf8" : "latin1" });
   } catch (error) {
     if (isFileSystemFailure(error)) return null;
     throw error;
   }
+}
+
+function isSourceListingName(name: string): boolean {
+  // Windows Unicode names outside Latin-1 cannot round-trip through source
+  // filename strings. POSIX enumeration already supplies one unit per byte.
+  for (let index = 0; index < name.length; index++) {
+    if (name.charCodeAt(index) === 0 || name.charCodeAt(index) > 255) return false;
+  }
+  return true;
 }
 
 function looseListingMode(path: Buffer): number | null {
@@ -274,8 +282,7 @@ function looseListingMode(path: Buffer): number | null {
 export function listLooseNames(directory: string | Buffer, path: string, extension: string): readonly string[] {
   const nativeDirectory = typeof directory === "string" ? Buffer.from(directory) : directory;
   const relative = looseRequestPath(path);
-  const target = looseOsPath(nativeDirectory, relative);
-  const stream = openListingDirectory(target);
+  const stream = openListingDirectory(nativeDirectory, relative);
   if (stream === null) return [];
   const names: string[] = [];
   const directoriesOnly = extension === "/";
@@ -283,6 +290,7 @@ export function listLooseNames(directory: string | Buffer, path: string, extensi
     // Bun/Node preserves its platform enumeration order but omits . and .. .
     // This is the supported platform profile, with no fabricated dot entries.
     for (let entry = stream.readSync(); entry !== null; entry = stream.readSync()) {
+      if (!isSourceListingName(entry.name)) continue;
       const mode = looseListingMode(looseOsPath(nativeDirectory, `${relative}/${entry.name}`));
       if (mode === null) continue;
       // Source tests this bit directly, including its socket/block-device overlap.
@@ -311,10 +319,11 @@ function listFilteredLooseNames(directory: Buffer, path: string, filter: string)
   const visit = (subdirs: string): void => {
     if (names.length === MAX_LISTED_FILES) return;
     const search = subdirs === "" ? base : `${base}/${subdirs}`;
-    const stream = openListingDirectory(looseOsPath(directory, search));
+    const stream = openListingDirectory(directory, search);
     if (stream === null) return;
     try {
       for (let item = stream.readSync(); item !== null; item = stream.readSync()) {
+        if (!isSourceListingName(item.name)) continue;
         const mode = looseListingMode(looseOsPath(directory, `${search}/${item.name}`));
         if (mode === null) continue;
         const relative = subdirs === "" ? item.name : `${subdirs}/${item.name}`;
@@ -332,7 +341,8 @@ function listFilteredLooseNames(directory: Buffer, path: string, filter: string)
 async function directoryEntries(path: Buffer): Promise<Dirent[]> {
   try {
     if (!lstatSync(path).isDirectory()) return [];
-    return await readdir(path, { withFileTypes: true, encoding: "latin1" });
+    return (await readdir(path, { withFileTypes: true, encoding: process.platform === "win32" ? "utf8" : "latin1" }))
+      .filter(entry => isSourceListingName(entry.name));
   } catch (error) {
     if (isFileSystemFailure(error)) return [];
     throw error;
@@ -343,7 +353,7 @@ function loosePaths(directory: Buffer, relativeDirectory = ""): readonly string[
   const currentPath = looseOsPath(directory, relativeDirectory);
   let entries: Dirent[];
   try {
-    entries = readdirSync(currentPath, { withFileTypes: true, encoding: "latin1" });
+    entries = readdirSync(currentPath, { withFileTypes: true, encoding: process.platform === "win32" ? "utf8" : "latin1" });
   } catch (error) {
     if (isFileSystemFailure(error)) return [];
     throw error;
@@ -351,6 +361,7 @@ function loosePaths(directory: Buffer, relativeDirectory = ""): readonly string[
   const found: string[] = [];
   entries.sort((left, right) => pathCompare(left.name, right.name));
   for (const entry of entries) {
+    if (!isSourceListingName(entry.name)) continue;
     const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
     if (entry.isDirectory()) {
       found.push(...loosePaths(directory, relativePath));

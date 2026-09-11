@@ -2,9 +2,11 @@
 // Replaces code/unix/linux_snd.c device ownership with SDL2 queued U8/S16 audio.
 import { dlopen, ptr } from "bun:ffi";
 import { endianness } from "node:os";
+import { openNativeLibrary } from "./native-libraries.ts";
 
 function loadAudio() {
-  return dlopen(process.env["QUAKE_SDL2_LIBRARY"] ?? "libSDL2-2.0.so.0", {
+  const loaded = openNativeLibrary("sdl2", path => dlopen(path, {
+    SDL_SetMainReady: { args: [], returns: "void" },
     SDL_InitSubSystem: { args: ["u32"], returns: "i32" },
     SDL_SetHint: { args: ["buffer", "buffer"], returns: "i32" },
     SDL_QuitSubSystem: { args: ["u32"], returns: "void" },
@@ -19,7 +21,9 @@ function loadAudio() {
     SDL_PauseAudioDevice: { args: ["u32", "i32"], returns: "void" },
     SDL_ClearQueuedAudio: { args: ["u32"], returns: "void" },
     SDL_CloseAudioDevice: { args: ["u32"], returns: "void" },
-  });
+  }));
+  loaded.symbols.SDL_SetMainReady();
+  return loaded;
 }
 
 let library: ReturnType<typeof loadAudio> | undefined;

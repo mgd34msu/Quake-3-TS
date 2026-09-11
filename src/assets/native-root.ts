@@ -1,8 +1,8 @@
-// Unix filesystem root bytes for code/qcommon/files.c:FS_BuildOSPath.
+// Native filesystem root bytes for code/qcommon/files.c:FS_BuildOSPath.
 // Copyright (C) 1999-2005 Id Software, Inc. GPL-2.0-or-later.
 
 import { Buffer } from "node:buffer";
-import { posix } from "node:path";
+import { posix, win32 } from "node:path";
 
 /** Owns native root spelling. Host Unicode enters only through fromHost. */
 export class NativeRoot {
@@ -36,7 +36,8 @@ export class NativeRoot {
   resolvedBytes(): Buffer {
     const spelling = this.sourceText;
     const cwd = NativeRoot.fromHost(process.cwd()).sourceText;
-    return Buffer.from(posix.resolve(cwd, spelling === "" ? "/" : spelling), "latin1");
+    const paths = process.platform === "win32" ? win32 : posix;
+    return Buffer.from(paths.resolve(cwd, spelling === "" ? paths.sep : spelling), "latin1");
   }
 }
 

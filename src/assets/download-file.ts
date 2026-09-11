@@ -5,6 +5,7 @@ import { closeSync, constants, fstatSync, openSync, realpathSync } from "node:fs
 import { Buffer } from "node:buffer";
 import type { NativeRoot } from "./native-root.ts";
 import type { BorrowedLooseRead } from "./file-handles.ts";
+import { containedNativePath, nativeFileOperations, sourceNativeComponent } from "../platform/file-native.ts";
 
 export type ServerDownloadErrorKind = "path" | "unsupported" | "io" | "size" | "changed";
 
@@ -19,9 +20,8 @@ function isMissing(error: unknown): boolean {
     && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
-function isContained(root: Buffer, path: Buffer): boolean {
-  return path.subarray(0, root.length).equals(root)
-    && (path.length === root.length || root.at(-1) === 0x2f || path[root.length] === 0x2f);
+function canonicalPathBytes(path: Buffer): Buffer {
+  return process.platform === "win32" ? Buffer.from(path.toString("utf8").replaceAll("\\", "/"), "utf8") : path;
 }
 
 function externalError(kind: ServerDownloadErrorKind, path: string, action: string, cause: unknown): ServerDownloadError {
@@ -30,36 +30,32 @@ function externalError(kind: ServerDownloadErrorKind, path: string, action: stri
 }
 
 function descriptorPath(descriptor: number, requestedPath: string): Buffer {
-  if (process.platform !== "linux") throw new ServerDownloadError("unsupported", requestedPath,
-    "Secure server download descriptor containment requires Linux /proc/self/fd", undefined);
-  try { return realpathSync(`/proc/self/fd/${descriptor}`, { encoding: "buffer" }); }
+  try { return nativeFileOperations().descriptorPath(descriptor); }
   catch (cause) { throw externalError("unsupported", requestedPath, "Cannot establish server download descriptor containment for", cause); }
 }
 
 function verifyDescriptorContainment(descriptor: number, root: Buffer, requestedPath: string): void {
-  if (!isContained(root, descriptorPath(descriptor, requestedPath))) throw new ServerDownloadError("path", requestedPath,
+  if (!containedNativePath(root, descriptorPath(descriptor, requestedPath))) throw new ServerDownloadError("path", requestedPath,
     `Opened server download path escapes configured root: ${JSON.stringify(requestedPath)}`, undefined);
 }
 
 /** Descriptor acquisition only. ServerFileSystem supplies source search/handle/sound ordering. */
 export function openDownloadDescriptor(root: NativeRoot, name: string): { readonly descriptor: number; readonly root: Buffer } | undefined {
-  if (process.platform !== "linux") throw new ServerDownloadError("unsupported", name,
-    "Secure server download descriptor containment requires Linux /proc/self/fd", undefined);
   for (let index = 0; index < name.length; index++) {
     const byte = name.charCodeAt(index);
     if (byte === 0 || byte > 255) throw new ServerDownloadError("path", name,
       "Server download filenames require non-NUL source bytes", undefined);
   }
   let rootBytes: Buffer, canonical: Buffer;
-  try { rootBytes = realpathSync(root.resolvedBytes(), { encoding: "buffer" }); }
+  try { rootBytes = canonicalPathBytes(realpathSync(root.resolvedBytes(), { encoding: "buffer" })); }
   catch (cause) { throw externalError("io", root.sourceText, "Cannot resolve server download root", cause); }
-  const requested = Buffer.concat([rootBytes, Buffer.from("/"), Buffer.from(name.replaceAll("\\", "/"), "latin1")]);
-  try { canonical = realpathSync(requested, { encoding: "buffer" }); }
+  const requested = Buffer.concat([rootBytes, Buffer.from("/"), sourceNativeComponent(name.replaceAll("\\", "/"))]);
+  try { canonical = canonicalPathBytes(realpathSync(requested, { encoding: "buffer" })); }
   catch (cause) {
     if (isMissing(cause)) return undefined;
     throw externalError("io", name, "Cannot resolve server download path", cause);
   }
-  if (!isContained(rootBytes, canonical)) throw new ServerDownloadError("path", name,
+  if (!containedNativePath(rootBytes, canonical)) throw new ServerDownloadError("path", name,
     `Server download path escapes configured root: ${JSON.stringify(name)}`, undefined);
   let descriptor: number;
   try { descriptor = openSync(canonical, constants.O_RDONLY | constants.O_NONBLOCK); }

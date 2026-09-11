@@ -166,7 +166,7 @@ export class SourceInputState {
     cvars.register("in_joystick", "0", CvarFlag.Archive | CvarFlag.Latch);
     cvars.register("in_debugjoystick", "0", CvarFlag.Temporary);
     cvars.register("joy_threshold", "0.15", CvarFlag.Archive);
-    const profile = cvars.register("in_joystickProfile", "linux", CvarFlag.Archive | CvarFlag.Latch).value;
+    const profile = cvars.register("in_joystickProfile", process.platform === "win32" ? "windows" : "linux", CvarFlag.Archive | CvarFlag.Latch).value;
     if (profile !== "linux" && profile !== "windows") throw new Error("in_joystickProfile must be linux or windows");
     this.joystickProfile = profile;
     cvars.register("in_joyBallScale", "0.02", CvarFlag.Archive);

@@ -174,12 +174,19 @@ function isDynamicImplementation(symbol: ts.Symbol | undefined): boolean {
     && (symbol?.declarations?.some((declaration) => declaration.getSourceFile().isDeclarationFile) ?? false);
 }
 
-function platformLibrary(node: ts.Expression | undefined): "sdl" | "gl" | "unix" | "freetype" | undefined {
+type PlatformLibrary = "sdl" | "gl" | "unix" | "darwin" | "ucrt" | "msvcrt" | "ntdll" | "kernel32" | "bun-files" | "freetype";
+
+function platformLibrary(node: ts.Expression | undefined): PlatformLibrary | undefined {
   if (node === undefined) return undefined;
   if (ts.isStringLiteralLike(node)) {
     if (["libSDL2-2.0.so.0", "libSDL2.so", "libSDL2.dylib", "libSDL2-2.0.0.dylib", "SDL2.dll"].includes(node.text)) return "sdl";
     if (["libGL.so", "libGL.so.1", "opengl32.dll", "/System/Library/Frameworks/OpenGL.framework/OpenGL"].includes(node.text)) return "gl";
     if (node.text === "libc.so.6") return "unix";
+    if (node.text === "/usr/lib/libSystem.B.dylib") return "darwin";
+    if (node.text === "ucrtbase.dll") return "ucrt";
+    if (node.text === "msvcrt.dll") return "msvcrt";
+    if (node.text === "ntdll.dll") return "ntdll";
+    if (node.text === "kernel32.dll") return "kernel32";
     if (node.text === "libfreetype.so.6") return "freetype";
   }
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
@@ -193,6 +200,78 @@ function platformLibrary(node: ts.Expression | undefined): "sdl" | "gl" | "unix"
     && node.left.expression.name.text === "env" && ts.isIdentifier(node.left.expression.expression)
     && node.left.expression.expression.text === "process" && platformLibrary(node.right) === "freetype") return "freetype";
   return undefined;
+}
+
+function helperLibrary(node: ts.CallExpression, checker: ts.TypeChecker, projectRoot: string, projectPath: string): PlatformLibrary | undefined {
+  const path = node.arguments[0], callback = node.parent;
+  if (path === undefined || !ts.isIdentifier(path) || !ts.isArrowFunction(callback) || callback.body !== node
+    || callback.parameters.length !== 1) return undefined;
+  const parameter = callback.parameters[0], call = callback.parent;
+  if (parameter === undefined || !ts.isIdentifier(parameter.name) || parameter.initializer !== undefined
+    || parameter.dotDotDotToken !== undefined || checker.getSymbolAtLocation(path) !== checker.getSymbolAtLocation(parameter.name)
+    || !ts.isCallExpression(call) || call.arguments.length !== 2 || call.arguments[1] !== callback
+    || !ts.isIdentifier(call.expression) || call.expression.text !== "openNativeLibrary") return undefined;
+  const imported = checker.getSymbolAtLocation(call.expression)?.declarations;
+  if (imported?.length !== 1) return undefined;
+  const declaration = imported[0];
+  if (declaration === undefined || !ts.isImportSpecifier(declaration) || declaration.propertyName !== undefined
+    || !ts.isImportDeclaration(declaration.parent.parent.parent)
+    || !ts.isStringLiteralLike(declaration.parent.parent.parent.moduleSpecifier)
+    || declaration.parent.parent.parent.moduleSpecifier.text !== "./native-libraries.ts") return undefined;
+  const helper = referenceSymbol(call.expression, checker);
+  if (helper?.getName() !== "openNativeLibrary" || helper.declarations?.length !== 1
+    || !helper.declarations.every(value => ts.isFunctionDeclaration(value)
+      && resolve(value.getSourceFile().fileName) === resolve(projectRoot, "src/platform/native-libraries.ts"))) return undefined;
+  const kind = call.arguments[0];
+  if (kind === undefined || !ts.isStringLiteralLike(kind)) return undefined;
+  if (kind.text === "sdl2" && ["src/platform/sdl.ts", "src/platform/audio.ts", "src/platform/sdl-render-context.ts"].includes(projectPath)) return "sdl";
+  if (kind.text === "freetype" && projectPath === "src/platform/freetype.ts") return "freetype";
+  return undefined;
+}
+
+function platformLibraries(node: ts.Expression | undefined): readonly PlatformLibrary[] | undefined {
+  if (node !== undefined && ts.isConditionalExpression(node)) {
+    const yes = platformLibraries(node.whenTrue), no = platformLibraries(node.whenFalse);
+    return yes === undefined || no === undefined ? undefined : [...yes, ...no];
+  }
+  const library = platformLibrary(node);
+  return library === undefined ? undefined : [library];
+}
+
+function platformLibraryAllowed(library: PlatformLibrary, projectPath: string): boolean {
+  switch (library) {
+    case "sdl": case "gl": case "unix": return true;
+    case "freetype": case "msvcrt": return projectPath === "src/platform/freetype.ts";
+    case "darwin": return ["src/platform/unix-io.ts", "src/platform/local-time.ts", "src/platform/freetype.ts", "src/platform/file-posix.ts"].includes(projectPath);
+    case "ucrt": return ["src/platform/unix-io.ts", "src/platform/local-time.ts"].includes(projectPath);
+    case "ntdll": case "kernel32": case "bun-files": return projectPath === "src/platform/file-windows.ts";
+  }
+}
+
+function platformSymbolAllowed(library: PlatformLibrary, symbol: string, projectPath: string): boolean {
+  switch (library) {
+    case "sdl": return /^SDL_/.test(symbol) && !["SDL_LoadObject", "SDL_LoadFunction", "SDL_UnloadObject"].includes(symbol);
+    case "gl": return /^gl[A-Z]/.test(symbol);
+    case "unix": return ["tcgetattr", "tcsetattr", "sigaction", "localtime_r", "tzset", "_exit"].includes(symbol)
+      || projectPath === "src/platform/freetype.ts" && symbol === "memcpy";
+    case "freetype": return ["FT_Init_FreeType", "FT_Done_FreeType", "FT_New_Memory_Face", "FT_Done_Face",
+      "FT_Set_Char_Size", "FT_Get_Char_Index", "FT_Load_Glyph", "FT_Outline_Translate", "FT_Outline_Get_Bitmap"].includes(symbol);
+    case "darwin":
+      if (projectPath === "src/platform/unix-io.ts") return ["tcgetattr", "tcsetattr", "sigaction", "_exit"].includes(symbol);
+      if (projectPath === "src/platform/local-time.ts") return ["localtime_r", "tzset"].includes(symbol);
+      if (projectPath === "src/platform/freetype.ts") return symbol === "memcpy";
+      return projectPath === "src/platform/file-posix.ts"
+        && ["__openat_nocancel", "__fcntl_nocancel", "__error", "lseek", "mkdirat", "renameat", "linkat", "unlinkat", "fstatat", "fstatat$INODE64"].includes(symbol);
+    case "ucrt": return projectPath === "src/platform/unix-io.ts" ? symbol === "_exit"
+      : projectPath === "src/platform/local-time.ts" && ["_localtime64_s", "_tzset", "_putenv_s"].includes(symbol);
+    case "msvcrt": return projectPath === "src/platform/freetype.ts" && symbol === "memcpy";
+    case "ntdll": return projectPath === "src/platform/file-windows.ts"
+      && ["NtCreateFile", "NtQueryInformationFile", "NtSetInformationFile", "NtClose", "RtlNtStatusToDosError"].includes(symbol);
+    case "kernel32": return projectPath === "src/platform/file-windows.ts"
+      && ["GetModuleHandleW", "GetProcAddress", "GetFinalPathNameByHandleW", "GetLastError", "GetCurrentProcess", "DuplicateHandle"].includes(symbol);
+    case "bun-files": return projectPath === "src/platform/file-windows.ts"
+      && ["uv_get_osfhandle", "uv_open_osfhandle", "uv_translate_sys_error", "uv_err_name"].includes(symbol);
+  }
 }
 
 export function auditProgram(program: ts.Program, projectFiles: readonly string[], projectRoot = program.getCurrentDirectory()): PolicyDiagnostic[] {
@@ -253,9 +332,11 @@ export function auditProgram(program: ts.Program, projectFiles: readonly string[
       const name = symbol.getName();
       if (name !== "dlopen" && name !== "linkSymbols") return;
       if (!platform) report(node, "ffi-boundary", "Only src/platform modules may call FFI loaders, including re-exported loaders.");
-      const library = name === "dlopen" ? platformLibrary(node.arguments[0]) : "gl";
-      if (library === undefined || library === "freetype" && projectPath !== "src/platform/freetype.ts")
-        report(node, "ffi-library", "FFI may load only named system SDL2/OpenGL libraries or approved libc and FreeType platform services.");
+      const helper = name === "dlopen" ? helperLibrary(node, checker, projectRoot, projectPath) : undefined;
+      const libraries: readonly PlatformLibrary[] | undefined = name === "linkSymbols" ? [projectPath === "src/platform/file-windows.ts" ? "bun-files" : "gl"]
+        : helper === undefined ? platformLibraries(node.arguments[0]) : [helper];
+      if (libraries === undefined || !libraries.every(library => platformLibraryAllowed(library, projectPath)))
+        report(node, "ffi-library", "FFI may load only named system libraries or the reviewed native-library helper in approved platform adapters.");
       const descriptors = node.arguments[name === "dlopen" ? 1 : 0];
       if (descriptors === undefined || !ts.isObjectLiteralExpression(descriptors)) {
         report(node, "ffi-symbol", "FFI requires a visible object of system platform symbol descriptors.");
@@ -264,14 +345,12 @@ export function auditProgram(program: ts.Program, projectFiles: readonly string[
       for (const property of descriptors.properties) {
         const key = property.name;
         const text = key !== undefined && (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) ? key.text : undefined;
-        if (!ts.isPropertyAssignment(property) || text === undefined
-          || !(library === "sdl" ? /^SDL_/.test(text) && !["SDL_LoadObject", "SDL_LoadFunction", "SDL_UnloadObject"].includes(text)
-            : library === "unix" ? ["tcgetattr", "tcsetattr", "sigaction", "localtime_r", "tzset", "_exit"].includes(text)
-              || projectPath === "src/platform/freetype.ts" && text === "memcpy"
-              : library === "freetype" ? ["FT_Init_FreeType", "FT_Done_FreeType", "FT_New_Memory_Face", "FT_Done_Face",
-                "FT_Set_Char_Size", "FT_Get_Char_Index", "FT_Load_Glyph", "FT_Outline_Translate", "FT_Outline_Get_Bitmap"].includes(text)
-                : library === "gl" && /^gl[A-Z]/.test(text))) {
-          report(property, "ffi-symbol", "FFI symbols must belong to the selected SDL2/OpenGL API or the explicit Unix platform allowlist; native module loading and opaque descriptors are forbidden.");
+        if (!ts.isPropertyAssignment(property) || text === undefined || !ts.isObjectLiteralExpression(property.initializer)
+          || property.initializer.properties.some(field => !ts.isPropertyAssignment(field)
+            || !(ts.isIdentifier(field.name) || ts.isStringLiteralLike(field.name))
+            || name === "dlopen" && field.name.text === "ptr")
+          || libraries === undefined || !libraries.every(library => platformSymbolAllowed(library, text, projectPath))) {
+          report(property, "ffi-symbol", "FFI symbols must belong to every selected system library and its approved adapter; native module loading and opaque descriptors are forbidden.");
         }
       }
     }

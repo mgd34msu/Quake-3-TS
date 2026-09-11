@@ -1,6 +1,6 @@
 {
   "name": "quake-3-ts",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "license": "GPL-2.0-or-later",
@@ -20,6 +20,7 @@
     "check": "bun run tools/check.ts",
     "check:portable": "bun run tools/check.ts --portable",
     "build": "bun run tools/build.ts",
+    "release:build": "bun run tools/release.ts",
     "inventory": "bun run tools/inventory.ts",
     "audit:assets": "bun run tools/audit-assets.ts"
   },

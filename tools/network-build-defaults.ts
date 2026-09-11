@@ -6,7 +6,7 @@ export function networkDefaultsPlugin(workspace: string, defaults: NetworkDefaul
   return {
     name: "network-defaults",
     setup(build) {
-      build.onLoad({ filter: /\/core\/network-defaults\.ts$/u }, async (args) => {
+      build.onLoad({ filter: /[/\\]core[/\\]network-defaults\.ts$/u }, async (args) => {
         if (args.path !== path) return undefined;
         let contents = await Bun.file(path).text();
         for (const [name, value] of Object.entries({ Q3_MASTER_SERVER: defaults.masterServer,

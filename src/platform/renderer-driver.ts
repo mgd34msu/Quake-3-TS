@@ -3,6 +3,7 @@
 import { CvarFlag } from "../core/cvar.ts";
 import type { CvarRegistry } from "../core/cvar.ts";
 import type { SdlWindow } from "./sdl.ts";
+import { defaultOpenGlDriver } from "./native-libraries.ts";
 
 /** The caller attempts its requested mode and mode 3 within each library attempt. */
 export function openUnixGlDriver(cvars: CvarRegistry, open: (driver: string) => SdlWindow): SdlWindow {
@@ -13,14 +14,15 @@ export function openUnixGlDriver(cvars: CvarRegistry, open: (driver: string) => 
   const requested = cvars.get("r_glDriver");
   if (requested === undefined) throw new Error("r_glDriver must register before GLimp_Init");
   let window: SdlWindow;
+  const defaultDriver = defaultOpenGlDriver();
   try { window = open(requested.value); }
   catch (error) {
-    if (requested.value.toLowerCase() === "libgl.so.1") throw error;
-    try { window = open("libGL.so.1"); }
+    if (requested.value.toLowerCase() === defaultDriver.toLowerCase()) throw error;
+    try { window = open(defaultDriver); }
     catch (fallback) {
       throw new AggregateError([error, fallback], "GLimp_Init() - could not load OpenGL subsystem", { cause: error });
     }
-    cvars.set("r_glDriver", "libGL.so.1", true);
+    cvars.set("r_glDriver", defaultDriver, true);
     cvars.clearModified("r_glDriver");
   }
   const selected = cvars.get("r_glDriver");

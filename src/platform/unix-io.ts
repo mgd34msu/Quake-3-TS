@@ -17,13 +17,14 @@ import { MAX_DATAGRAM_LENGTH, UdpReceiveInvariantError, UdpTransport } from "./n
 import type { Ipv4Address, Ipv4Host } from "./network.ts";
 import type { SystemClock } from "./system-clock.ts";
 import { TtyConsole } from "./tty-console.ts";
+import { consolePlatform, consoleTermios, signalActionSize, termiosSize } from "./portable-console-abi.ts";
 
 export const MAX_UNIX_SYSTEM_EVENTS = 256;
 export const MAX_UNIX_CONSOLE_LINE = 1023;
 export type UnixQueuedSystemEvent = Exclude<CommonSystemEvent, { readonly kind: "none" }>;
 export type UnixNoneSystemEvent = Extract<CommonSystemEvent, { readonly kind: "none" }>;
 
-export type UnixSignalName = "SIGHUP" | "SIGQUIT" | "SIGILL" | "SIGTRAP" | "SIGIOT" | "SIGBUS" | "SIGFPE" | "SIGSEGV" | "SIGTERM";
+export type UnixSignalName = "SIGHUP" | "SIGQUIT" | "SIGILL" | "SIGTRAP" | "SIGIOT" | "SIGBUS" | "SIGFPE" | "SIGSEGV" | "SIGTERM" | "SIGINT" | "SIGBREAK";
 export interface UnixSignalRuntime {
   install(signal: UnixSignalName, handler: () => undefined): undefined;
   remove(signal: UnixSignalName, handler: () => undefined): undefined;
@@ -48,6 +49,7 @@ type ConsoleMode = { readonly kind: "line" }
 interface TtyTermios {
   readonly erase: number;
   readonly active: boolean;
+  readonly profile: "tty-linux-glibc" | "tty-darwin" | "tty-windows";
   activate(): void;
   close(): void;
 }
@@ -62,25 +64,23 @@ const unixSignals: readonly { readonly name: UnixSignalName; readonly number: nu
 ];
 
 function acquireJobControlSignals(): () => undefined {
+  const platform = consolePlatform(process.platform, process.arch);
+  // Windows has no terminal process groups or SIGTTIN/SIGTTOU dispositions.
+  if (platform === "win32") return () => undefined;
   let shared = jobControlSignals;
   if (shared === null) {
-    if (process.platform !== "linux" || process.arch !== "x64") {
-      throw new Error("Unix job-control signal setup requires Linux x64 glibc");
-    }
-    const library = dlopen("libc.so.6", {
+    const library = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
       sigaction: { args: ["i32", "buffer", "buffer"], returns: "i32" },
     });
-    // Linux x64 glibc bits/{sigaction,types/__sigset_t,signum-*}.h:
-    // handler at 0, 128-byte mask at 8, flags at 136, restorer at 144.
     // SIG_IGN is the handler word 1, not a callback that catches the signal.
-    const ignored = new Uint8Array(152);
+    const size = signalActionSize(platform), ignored = new Uint8Array(size);
     new DataView(ignored.buffer).setBigUint64(0, 1n, true);
     const saved: { readonly signal: number; readonly action: Uint8Array }[] = [];
     const restore = (): undefined => {
       const errors: unknown[] = [];
       for (let entry = saved.pop(); entry !== undefined; entry = saved.pop()) {
         try {
-          if (library.symbols.sigaction(entry.signal, entry.action, new Uint8Array(152)) !== 0) {
+          if (library.symbols.sigaction(entry.signal, entry.action, new Uint8Array(size)) !== 0) {
             throw new Error(`Failed to restore Unix signal ${entry.signal}`);
           }
         } catch (error) { errors.push(error); }
@@ -91,7 +91,7 @@ function acquireJobControlSignals(): () => undefined {
     try {
       // Sys_ConsoleInputInit installs these before looking up ttycon.
       for (const signal of [21, 22]) {
-        const action = new Uint8Array(152);
+        const action = new Uint8Array(size);
         if (library.symbols.sigaction(signal, ignored, action) !== 0) throw new Error(`Failed to ignore Unix signal ${signal}`);
         saved.push({ signal, action });
       }
@@ -116,33 +116,45 @@ function acquireJobControlSignals(): () => undefined {
 }
 
 function prepareTtyTermios(input: ReadStream): TtyTermios {
-  // Linux x64 glibc bits/termios{,-struct,-c_cc,-c_iflag,-c_lflag}.h.
-  // Keep ISIG, ICRNL and the real signal/erase control bytes. Bun setRawMode
-  // also clears ISIG and cannot implement this source terminal configuration.
-  if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new Error("Source TTY termios currently requires Linux x64 glibc; use +set ttycon 0");
-  }
+  const platform = consolePlatform(process.platform, process.arch);
   const descriptor: unknown = "fd" in input ? input.fd : undefined;
   if (typeof descriptor !== "number" || !Number.isInteger(descriptor) || descriptor < 0 || descriptor > 2147483647) {
     throw new Error("TTY input has no valid Unix descriptor");
   }
   if (terminalOwners.has(descriptor)) throw new Error("TTY input already has a console owner");
-  const library = dlopen("libc.so.6", {
+  if (platform === "win32") {
+    terminalOwners.add(descriptor);
+    let active = false, restore = false, closed = false;
+    return {
+      erase: 8, profile: "tty-windows",
+      get active() { return active; },
+      activate: (): void => {
+        if (closed || restore) throw new Error("TTY terminal settings have already been applied or closed");
+        restore = true;
+        input.setRawMode(true);
+        active = true;
+      },
+      close: (): void => {
+        if (closed) return;
+        closed = true; active = false; terminalOwners.delete(descriptor);
+        if (restore) input.setRawMode(false);
+      },
+    };
+  }
+  // Keep ISIG, ICRNL and the real signal/erase control bytes on POSIX.
+  const library = dlopen(process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
     tcgetattr: { args: ["i32", "buffer"], returns: "i32" },
     tcsetattr: { args: ["i32", "i32", "buffer"], returns: "i32" },
   });
-  const saved = new Uint8Array(60);
+  const saved = new Uint8Array(termiosSize(platform));
   try {
     if (library.symbols.tcgetattr(descriptor, saved) !== 0) throw new Error("TTY tcgetattr failed");
   } catch (error) { library.close(); throw error; }
-  const changed = new Uint8Array(saved), settings = new DataView(changed.buffer);
-  settings.setUint32(12, settings.getUint32(12, true) & ~0x0a, true);
-  settings.setUint32(0, settings.getUint32(0, true) & ~0x30, true);
-  settings.setUint8(17 + 6, 1); settings.setUint8(17 + 5, 0);
+  const { bytes: changed, erase } = consoleTermios(saved, platform);
   terminalOwners.add(descriptor);
   let active = false, restore = false, closed = false;
   return {
-    erase: settings.getUint8(17 + 2),
+    erase, profile: platform === "linux" ? "tty-linux-glibc" : "tty-darwin",
     get active() { return active; },
     activate: (): void => {
       if (closed || restore) throw new Error("TTY terminal settings have already been applied or closed");
@@ -245,9 +257,9 @@ export class UnixIo {
   get udp(): UdpTransport | null { return this.network.kind === "ready" ? this.network.udp : null; }
   get lan(): LanAddresses { return this.network.kind === "ready" ? this.network.lan : this.emptyLan; }
   get consoleActive(): boolean { return this.console.kind === "initialized" && !this.console.ended; }
-  get consoleProfile(): "line-latin1" | "tty-linux-glibc" {
+  get consoleProfile(): "line-latin1" | TtyTermios["profile"] {
     return this.console.kind === "initialized" && this.console.mode.kind === "tty" && this.console.mode.terminal.active
-      ? "tty-linux-glibc" : "line-latin1";
+      ? this.console.mode.terminal.profile : "line-latin1";
   }
 
   /** linux_signals.c InitSig, reached by GLimp_Init or dedicated main. */
@@ -256,12 +268,19 @@ export class UnixIo {
     this.shutdownSignalGraphics = shutdownGraphics;
     if (this.signals === "none" || this.releaseSignals !== null) return;
     let runtime: UnixSignalRuntime;
+    let signals = unixSignals;
     let closeLibrary: (() => void) | null = null;
     if (this.signals === "process") {
-      if (process.platform !== "linux" || process.arch !== "x64") throw new Error("Unix signal handling requires Linux x64 glibc");
+      const platform = consolePlatform(process.platform, process.arch);
       if (processSignalOwner !== null) throw new Error("Unix process signals already have an owner");
-      const library = dlopen("libc.so.6", { _exit: { args: ["i32"], returns: "void" } });
+      const library = dlopen(process.platform === "win32" ? "ucrtbase.dll" : process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6", {
+        _exit: { args: ["i32"], returns: "void" },
+      });
       closeLibrary = () => library.close();
+      // libuv supplies Windows console control events, not Unix fault signals.
+      // Darwin SIGBUS is 10. Injected runtimes retain the original Linux table.
+      if (platform === "win32") signals = [{ name: "SIGHUP", number: 1 }, { name: "SIGINT", number: 2 }, { name: "SIGBREAK", number: 21 }];
+      else if (platform === "darwin") signals = unixSignals.map(signal => ({ ...signal, number: signal.name === "SIGBUS" ? 10 : signal.number }));
       // Bun dispatches these on its JavaScript event loop. This does not recover
       // synchronous CPU faults or interrupt blocked JavaScript like C handlers.
       runtime = {
@@ -284,7 +303,7 @@ export class UnixIo {
       if (errors.length !== 0) throw new AggregateError(errors, "Unix signal cleanup failed", { cause: errors[0] });
     };
     try {
-      for (const { name, number } of unixSignals) {
+      for (const { name, number } of signals) {
         const handler = (): undefined => {
           if (this.signalCaught) {
             runtime.write(`DOUBLE SIGNAL FAULT: Received signal ${number}, exiting...\n`);
@@ -591,6 +610,12 @@ export class UnixIo {
     if (!(chunk instanceof Uint8Array) || chunk.length !== 1) throw new Error("Dedicated console returned non-byte input");
     const byte = chunk[0];
     if (byte === undefined) throw new Error("Dedicated console returned an empty byte read");
+    // Windows raw console input supplies CR for Enter and delivers Ctrl-C as
+    // a byte. POSIX retains ICRNL/ISIG in its saved terminal configuration.
+    if (this.console.kind === "initialized" && this.console.mode.kind === "tty" && this.console.mode.terminal.profile === "tty-windows") {
+      if (byte === 3 && this.signals === "process") { process.emit("SIGINT"); return null; }
+      if (byte === 13) return 10;
+    }
     return byte;
   }
 

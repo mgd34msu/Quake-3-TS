@@ -1,6 +1,7 @@
 // Renderer cvars and command initialization from id Software's tr_init.c and tr_cmds.c.
 // SPDX-License-Identifier: GPL-2.0-or-later
 import { CvarFlag, CvarRegistry } from "../core/cvar.ts";
+import { defaultOpenGlDriver } from "../platform/native-libraries.ts";
 import type { CvarSnapshot } from "../core/cvar.ts";
 import type { RailSettings } from "./entity-primitives.ts";
 import type { ColorMappingInputs, ImageUploadProfile } from "./image-upload.ts";
@@ -197,7 +198,7 @@ export class RegisteredRendererCvars {
     initial: { readonly width: number; readonly height: number } | null = null,
     readonly print: (text: string) => void = text => { process.stdout.write(text); }) {
     const registrations: readonly RendererCvarRegistration[] = [
-      ["r_glDriver", "libGL.so.1", ARCHIVE_LATCH],
+      ["r_glDriver", defaultOpenGlDriver(), ARCHIVE_LATCH],
       ["r_allowExtensions", "1", ARCHIVE_LATCH],
       ["r_ext_compressed_textures", "0", ARCHIVE_LATCH],
       ["r_ext_gamma_control", "1", ARCHIVE_LATCH],
